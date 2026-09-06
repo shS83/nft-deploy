@@ -5,8 +5,8 @@ import subprocess
 import shutil
 
 class Failsafe(object):
-	def __init__(self, failsafe_timer: int, command: str="echo 'Win'", backup_file: str="/tmp/nftables.conf.backup") -> None:
-		self.backup_file = backup_file
+	def __init__(self, failsafe_timer: int, command: str="echo 'Win'", backupfile: str ="/tmp/nftables.conf.backup") -> None:
+		self.backup_file = backupfile
 		self.timer = failsafe_timer
 		self.command = command
 		self.config_file = "/etc/nftables.conf"
@@ -46,12 +46,12 @@ class Failsafe(object):
 				#	self.check_main_status()
 				# print("Dead.")
 				# return False, "Process hung"
-		program = subprocess.Popen(["systemctl", "status", "nftables"], shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-		stdout, stderr = program.communicate(timeout=5)
-		if not "enabled" in stdout:
+		if subprocess.run(
+			["systemctl", "is-active", "--quiet", "nftables.service"]
+		).returncode != 0:
 			print("The process is not running. Trying to restart it.")
 			program = subprocess.Popen(["systemctl", "restart", "nftables.service"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-			program = subprocess.Popen(["systemctl", "status", "nftables"], shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+			program = subprocess.Popen(["systemctl", "status", "nftables.service"], shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 			stdout, stderr = program.communicate(timeout=1)
 
 			if "failed" in stdout:
