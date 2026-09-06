@@ -580,7 +580,6 @@ if __name__ == "__main__":
                 "Dry run finished successfully. "
                 "No changes were made to the config file."
             )
-            process.main(dry_run=True)
 
     if str(process).isdigit():
         sys.exit(1)
