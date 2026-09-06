@@ -143,9 +143,9 @@ class Deployer:
             new_ruleset.append(line)
         new_ruleset.append("# End of custom ruleset")
         print(f"Added no. of custom rule lines: {len(new_lines)}")
-        new_ruleset = str("\n".join(new_ruleset))
+        printable = str("\n".join(new_ruleset))
         print("\033[1;34mAces!\033[0m")
-        print(f"Added custom ruleset: \n\033[1;37m{"".join(new_ruleset)}\033[0m\n")
+        print(f"Added custom ruleset: \n\033[1;37m{printable}\033[0m\n")
         print("Cleaning up ruleset...")
         for rule in new_ruleset:
             final.append(re.sub(re.compile(r"\\033\[.*m$"), rule, ""))
