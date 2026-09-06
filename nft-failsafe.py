@@ -27,7 +27,7 @@ class Failsafe(object):
 		self.errors = False
 		print(
 			"\033[s"  # Save current cursor position
-			"\033[1A"  # Move one line up
+			# "\033[1A"  # Move one line up
 			"\r"  # Move to beginning of line
 			"\033[2K"  # Clear entire line
 			f"{text}"
@@ -36,9 +36,20 @@ class Failsafe(object):
 			flush=True,
 		)
 
-	def countdown(self) -> None:
+	def countdown(self, override_timer: int | None = None) -> None:
+		duration = (
+			override_timer
+			if override_timer is not None
+			else self.timer
+		)
+
+		if duration < 0:
+			raise ValueError(
+				"Countdown duration cannot be negative"
+			)
+
 		symbols = ("♹", "♸", "♷", "♶", "♵", "♴", "♳")
-		deadline = time.monotonic() + self.timer
+		deadline = time.monotonic() + duration
 		previous_second = None
 
 		while True:
@@ -112,12 +123,14 @@ class Failsafe(object):
 			],
 		).returncode == 0
 
-		ruleset_result = subprocess.run([self.nft, "list", "ruleset"], capture_output=True, text=True)
+		ruleset_result = subprocess.run(["sudo", self.nft, "list", "ruleset"], capture_output=True, text=True)
 
 		ruleset_active = (
 				ruleset_result.returncode == 0
 				and "table inet filter" in ruleset_result.stdout
 		)
+		print(f"Ruleset: {ruleset_result.stdout}")
+		print(f"Ruleset active: {ruleset_result.returncode}")
 
 		print(f"{c.white}Systemd service enabled: {c.lime_green if enabled else c.crimson}{enabled}")
 		print(f"{c.white}Systemd service active: {c.lime_green if service_active else c.crimson}{service_active}")
