@@ -2,7 +2,6 @@ import os
 import subprocess
 import sys
 import zlib
-import psutil
 from ipaddress import IPv4Interface
 from pyroute2 import IPRoute
 import shutil
@@ -63,7 +62,7 @@ def get_default_network():
 
 class Deployer:
     def __init__(self, args: list):
-        self.pwd: str = os.getcwd()
+        self.pwd: str = str(Path(__file__).resolve().parent)
         self.args: list = args
         self.kwargs: list = []
         self.is_dry_run: bool = False
@@ -77,7 +76,7 @@ class Deployer:
         self.ruleset: str = ""
         self.comment: str | None = None
         self.compressed_config: bytes = b""
-        self.failsafe_timer: float = 6.0
+        self.failsafe_timer: float = 60.0
         self.user_home: str | None = os.getenv("HOME")
         self.backup_file: str = "/tmp/nft-deploy/nftables.conf.backup"
         self.ports: list = []
@@ -146,7 +145,7 @@ class Deployer:
             )
 
             shutil.copy2(
-                "/etc/nftables.conf",
+                self.config_path,
                 backup_file,
             )
 
@@ -234,7 +233,6 @@ class Deployer:
 
             print(f"{c.silver}", end="")
             print(line)
-                # new_ruleset.append(userconfig.rstrip())
             new_ruleset.append(line)
 
         custom_line_count = len(custom_ruleset.splitlines())
@@ -246,7 +244,7 @@ class Deployer:
 
         print(f"{c.reset}", end="")
 
-        print(f"Added no. of custom rule lines: {c.bright_aqua}{len(new_lines)}, lines: {", ".join(str(x) for x in new_lines)}{c.reset}")
+        print(f"{c.white}Added no. of custom rule lines: {c.bright_aqua}{len(new_lines)}{c.white}, lines: {c.golden_orange}{", ".join(str(x) for x in new_lines)}{c.reset}")
         print(f"{c.deep_purple}Aces!{c.reset}")
         return "\n".join(new_ruleset)
 
@@ -260,44 +258,44 @@ class Deployer:
             match arg:
                 case "--port":
                     if i + 1 >= len(self.args):
-                        raise SystemExit(f"{self.colors.get('crimson')}--port needs a value{self.colors.get('reset')}")
+                        raise SystemExit(f"{c.crimson}--port needs a value{c.reset}")
 
                     try:
                         port = int(self.args[i + 1])
                     except ValueError:
-                        raise SystemExit(f"{self.colors.get('crimson')}--port needs a numerical value{self.colors.get('reset')}")
+                        raise SystemExit(f"{c.crimson}--port needs a numerical value{c.reset}")
 
                     if not 1 <= port <= 65535:
-                        raise SystemExit(f"{self.colors.get('crimson')}--port must be between 1 and 65535{self.colors.get('reset')}")
+                        raise SystemExit(f"{c.crimson}--port must be between 1 and 65535{c.reset}")
 
                     self.ports.append(port)
 
                 case "--comment":
                     if i + 1 >= len(self.args):
-                        raise SystemExit(f"{self.colors.get('crimson')}--comment needs a value{self.colors.get('reset')}")
+                        raise SystemExit(f"{c.crimson}--comment needs a value{c.reset}")
 
                     self.comment = self.args[i + 1]
 
                 case "--config":
                     if i + 1 >= len(self.args):
-                        raise SystemExit(f"{self.colors.get('crimson')}--config needs a filename{self.colors.get('reset')}")
+                        raise SystemExit(f"{c.crimson}--config needs a filename{c.reset}")
 
                     self.config_path = self.args[i + 1]
 
                 case "--file":
                     if i + 1 >= len(self.args):
-                        raise SystemExit(f"{self.colors.get('crimson')}--file needs a filename{self.colors.get('reset')}")
+                        raise SystemExit(f"{c.crimson}--file needs a filename{c.reset}")
 
                     self.custom_file = self.args[i + 1]
 
                 case "--timer":
                     if i + 1 >= len(self.args):
-                        raise SystemExit(f"{self.colors.get('crimson')}--timer needs a value{self.colors.get('reset')}")
+                        raise SystemExit(f"{c.crimson}--timer needs a value{c.reset}")
 
                     try:
                         self.failsafe_timer = int(self.args[i + 1])
                     except ValueError:
-                        raise SystemExit(f"{self.colors.get('crimson')}--timer needs a numerical value{self.colors.get('reset')}")
+                        raise SystemExit(f"{c.crimson}--timer needs a numerical value{c.reset}")
 
                 case "--deploy":
                     action = "deploy"
@@ -372,72 +370,59 @@ class Deployer:
         return 0
 
     def test_rules(self, conf_filename: str = "") -> int:
-        errors = []
-        if not conf_filename:
-            conf_filename = self.config_path
-
-        print(f"Executable {self.nft} will be ran as root.")
-        program: object = None
-        try:
-            program = subprocess.Popen(["sudo", self.nft, "-c", "-f", conf_filename or self.config_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            stdout, stderr = program.communicate()
-            if stdout != "":
-                errors = stderr or "Misconfigured config file"
-                print(f"You have an error:\n{stdout}")
-                print(f"DEBUG: {stderr}")
-                raise RuntimeError(f"Your config file is misconfigured:\n{stdout}")
-            else:
-                print("Excellent! Clean config file.")
-        except (
-            FileNotFoundError,
-            PermissionError,
-            ValueError,
-            OSError,
-        ) as error:
-            print(f"Error: {error}")
-            print(f"DEBUG: {"\n".join(errors)}")
-            if program is not None:
-                print(f"Return code: {program.returncode}")
-        return 0
+        result = subprocess.run(
+            ([] if os.geteuid() == 0 else ["sudo"])
+            + [self.nft, "-c", "-f", conf_filename or self.config_path],
+            capture_output=True, text=True,
+        )
+        if result.returncode:
+            print(result.stderr or result.stdout or "Ruleset validation failed.")
+        else:
+            print("Excellent! Clean config file.")
+        return result.returncode
 
     def deploy(self):
-        if not self.backup_first():
-            print(
-                f"{c.bright_red}"
-                f"Deployment aborted because backup failed."
-                f"{c.reset}"
-            )
+        if os.geteuid() != 0:
+            print("Deployment requires root. Run this script with sudo.")
             return 1
-        if self.ruleset == "":
-            self.ruleset = self.get_default_rules()
-            self.custom_ruleset = self.get_promethean_rules()
-            self.ruleset = self.merge_ruleset(self.ruleset, self.custom_ruleset)
-        print(f"Deploying with {self.config_path}...")
-        print(f"Deploying following ruleset: \n{self.ruleset}")
-        with open("/tmp/nftables.conf", "w") as f:
-            f.write(self.ruleset)
-        passable = self.test_rules("/tmp/nftables.conf")
-        if passable != 0:
-            print("This was tested and something is really broken, sorry mate.")
+        if self.failsafe_timer < 0:
+            print("Failsafe timer cannot be negative.")
             return 1
-        print("Deploying...")
-        program = subprocess.Popen(["sudo", self.nft, "-f", "-c", "/tmp/nftables.conf"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        stdout, stderr = program.communicate(timeout=10)
-        if len(stdout.strip()) > 0:
-            print(stdout)
-            print(stderr)
-        if program.returncode != 0:
-            print("Something went wrong, sorry mate.")
-        program = subprocess.Popen(["sudo", "cp", "-b", "-v", "/tmp/nftables.conf", "/etc/nftables.conf"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        stdout, stderr = program.communicate(timeout=10)
-        if len(stdout.strip()) > 0:
-            print(stdout)
-            print(stderr)
-        if program.returncode != 0:
-            print("Something went wrong, sorry mate.")
-        print(f"Done. New configuration can be found in {c.lime_yellow}/etc/nftables.conf{c.reset}.")
-        print(f"I've been {c.light_salmon}deployed{c.reset}")
-        return 0
+        if self.check_env() != 0 or not self.backup_first():
+            return 1
+        if not self.ruleset:
+            self.ruleset = self.merge_ruleset(self.get_default_rules(), self.get_promethean_rules())
+        candidate = Path(self.backup_file + ".candidate")
+        candidate.write_text(self.ruleset)
+        try:
+            if self.test_rules(str(candidate)) != 0:
+                return 1
+            print("Deploying...", flush=True)
+            # Start the independent guard before changing the firewall. It waits
+            # for EOF so the countdown also starts if the parent exits early.
+            guard = self.start_failsafe()
+            deployment_ok = False
+            try:
+                shutil.copyfile(candidate, self.config_path)
+                result = subprocess.run(
+                    [self.nft, "-f", self.config_path],
+                    capture_output=True, text=True, timeout=30,
+                )
+                deployment_ok = result.returncode == 0
+                if not deployment_ok:
+                    print(result.stderr or result.stdout or "Deployment failed.")
+                    shutil.copyfile(self.backup_file, self.config_path)
+            except (OSError, subprocess.SubprocessError) as error:
+                print(f"Deployment failed: {error}")
+                shutil.copyfile(self.backup_file, self.config_path)
+            finally:
+                guard.stdin.close()
+            if deployment_ok:
+                print(f"Configuration saved in {self.config_path}. Failsafe verification continues in the background.", flush=True)
+                return 0
+            return 1
+        finally:
+            candidate.unlink(missing_ok=True)
 
     def dry_run(self) -> int:
         if not self.backup_first():
@@ -488,100 +473,22 @@ class Deployer:
             return 1
         return 0
 
-    def main(self, dry_run : bool = False):
-        error: object
-        result = self.check_env()
-        matches = []
-
-        if result != 0:
-            return 1
-
-        setsid = shutil.which("setsid")
-        print(f"SETSID: {setsid}")
-        python3 = shutil.which("python3")
-        print(f"PYTHON3: {python3}")
-        print(f"PWD: {self.pwd}")
-        auth = subprocess.run(
-            ["sudo", "-v"],
-            check=False,
-        )
-
-        if auth.returncode != 0:
-            raise PermissionError(
-                "Could not authenticate failsafe"
-            )
-
-        failsafe_command = [
-            "sudo",
-            "-n",
-            python3,
-            os.path.join(self.pwd, "nft-failsafe.py"),
-            str(int(self.failsafe_timer)),
-            str(self.backup_file),
-        ]
-
+    def start_failsafe(self):
         program = subprocess.Popen(
-            failsafe_command,
-            stdin=subprocess.DEVNULL,
-            stdout=None,
-            stderr=None,
+            [sys.executable, "-u", str(Path(self.pwd) / "nft-failsafe.py"),
+             str(int(self.failsafe_timer)), self.backup_file,
+             "--config", self.config_path, "--wait-for-parent"],
+            stdin=subprocess.PIPE,
             start_new_session=True,
-            text=True,
         )
+        print(f"Failsafe started with PID: {program.pid}", flush=True)
+        return program
 
-        time.sleep(0.2)
-
-        returncode = program.poll()
-
-        if returncode is not None:
-            raise RuntimeError(
-                f"Failsafe ended abruptly: {returncode}"
-            )
-
-        print(
-            f"Failsafe started with PID: {program.pid}",
-            flush=True,
-        )
-
-        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-            try:
-                cmdline = proc.info["cmdline"] or []
-
-                if "nft-failsafe" in proc.info["name"] or any("nft-failsafe" in argument for argument in cmdline):
-                    print(f"Failsafe successfully started as {proc.pid}")
-                    matches.append({"pid": proc.pid, "name": proc.info["name"], "cmdline": proc.info["cmdline"]})
-
-            except (psutil.NoSuchProcess, psutil.AccessDenied) as error:
-                match error:
-                    case psutil.NoSuchProcess:
-                        print(f"Failsafe has failed: {error.__str__}")
-                        return 1
-                    case psutil.AccessDenied:
-                        print(f"Permission problem {error.__str__}")
-                        return 1
-                    case _:
-                        print("This should never have been reached.")
-                        return 1
-        return 0
 
 if __name__ == "__main__":
-    arguments = sys.argv
-    process = Deployer(arguments)
-    if len(sys.argv) == 1:
-        process.help()
-    elif len(arguments) > 1:
-        print("Starting...")
-        if (returned := process.check_args()) == 0:
-            process.main()
-        elif returned == 1:
-            process.help()
-        elif returned == 2:
-            print(
-                "Dry run finished successfully. "
-                "No changes were made to the config file."
-            )
-
-    if str(process).isdigit():
-        sys.exit(1)
-
-    sys.exit(0)
+    process = Deployer(sys.argv)
+    result = process.check_args()
+    if result == 2:
+        print("Dry run finished successfully. No changes were made to the config file.")
+        result = 0
+    sys.exit(result)
