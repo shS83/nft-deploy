@@ -128,11 +128,11 @@ class Deployer:
         new_ruleset = ["# Begin of custom ruleset"]
         new_lines = []
         user_ports = []
-        final = []
         ruleset = ruleset.split("\n")
         print("Adding custom ruleset:\n\033[1;37m")
         for i, line in enumerate(ruleset):
             if "pkttype" in line and custom_ruleset != "":
+                new_lines.append("".join([str(i + n) for n, _ in enumerate(custom_ruleset.split("\n"))]))
                 print("\033[1;32m", end="")
                 new_ruleset.append(custom_ruleset)
                 print(custom_ruleset)
@@ -147,15 +147,14 @@ class Deployer:
             print("\033[1;37m", end="")
             print(line)
                 # new_ruleset.append(userconfig.rstrip())
-            new_lines.append(i)
             new_ruleset.append(line)
         print("# End of custom ruleset")
         print("\033[0m", end="")
         new_ruleset.append("# End of custom ruleset")
 
-        print(f"Added no. of custom rule lines: {len(new_lines)}")
+        print(f"Added no. of custom rule lines: {len(new_lines)} -- {new_lines}")
         print("\033[1;34mAces!\033[0m")
-        return "".join(final)
+        return "\n".join(new_ruleset) + "\n"
 
     def check_args(self):
         action = None
