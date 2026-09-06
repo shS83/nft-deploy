@@ -96,8 +96,10 @@ class Failsafe:
         print(f"{c.white}Systemd service enabled: {c.lime_green if enabled.returncode == 0 else c.crimson}{enabled.stdout.strip().capitalize()}")
         print(f"{c.white}Systemd service active: {c.lime_green if active.returncode == 0 else c.crimson}{active.stdout.strip().capitalize()}")
         print(f"{c.white}Nftables ruleset loaded: {c.lime_green if loaded != 0 else c.crimson}{loaded}")
+        system_status = enabled.returncode == 0 and active.returncode == 0 and loaded
+
         print(
-            f"{c.white}Comprehensive system status: {c.bright_green}{"Complete" if active.returncode == 0 and loaded else "INCOMPLETE"}{c.reset}")
+            f"{c.white}Comprehensive system status: {c.bright_green if system_status else c.crimson}{"Complete" if system_status else "Incomplete"}{c.reset}")
 
         # Boot enablement is reported separately from the live firewall state.
         return active.returncode == 0 and loaded
@@ -130,10 +132,10 @@ class Failsafe:
         if not sys.stdin.isatty() or os.tcgetpgrp(sys.stdin.fileno()) != os.getpgrp():
             print("Run the rollback command in the foreground.", flush=True)
             return False
-        print(f"Backup: {self.backup_file}\nRestore point: {self.config_file}", flush=True)
+        print(f"{c.white}Backup: {c.amethyst}{self.backup_file}\n{c.white}Restore point: {c.coral}{self.config_file}", flush=True)
         try:
             answer = input(
-                "Do you want to restore the backup and restart nftables? [y/N] "
+                f"Do you want to restore the backup and restart nftables? [{c.green}y{c.reset}/{c.bright_red}N{c.reset}] "
             ).strip().casefold()
         except (EOFError, KeyboardInterrupt):
             answer = ""
@@ -173,6 +175,7 @@ def main():
     parser.add_argument("--rollback", action="store_true", help="Confirm backup restoration in the foreground")
     parser.add_argument("--simulate-failure", action="store_true", help="Simulate a failed check without changing the firewall")
     args = parser.parse_args()
+
     if args.rollback and args.simulate_failure:
         parser.error("--rollback cannot be combined with --simulate-failure")
     if args.rollback and args.wait_for_parent:
@@ -186,11 +189,13 @@ def main():
         parser.error("Failsafe requires root privileges; run the deployer with sudo")
     try:
         failsafe = Failsafe(args.timer, backup_file, args.config, simulate_failure=args.simulate_failure)
+
         if args.rollback:
             return 0 if failsafe.confirm_rollback() else 1
         if args.wait_for_parent:
             sys.stdin.buffer.read()
         return 0 if failsafe.activate_failsafe() else 1
+
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"Failsafe failed: {error}", file=sys.stderr, flush=True)
         return 1
