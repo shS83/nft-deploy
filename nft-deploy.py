@@ -217,10 +217,10 @@ class Deployer:
                 print(custom_ruleset)
                 if len(self.ports) > 0:
                     # print(f"DEBUG (ports): {self.ports}")
+                    print("    # End of custom ruleset\n")
+                    new_ruleset.append("    # End of custom ruleset\n")
                     for port in self.ports:
                         if checked == 1:
-                            print("    # End of custom ruleset\n")
-                            new_ruleset.append("    # End of custom ruleset\n")
                             print(f"{c.bright_aqua}", end="")
                             print ("    # Begin of user configured ports")
                             new_ruleset.append("    # Begin of user configured ports")
@@ -496,16 +496,21 @@ class Deployer:
         if result != 0:
             return 1
 
-        setsid = subprocess.Popen(["which", "setsid"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        stdout, stderr = setsid.communicate(timeout=1)
-        setsid = stdout.strip()
+        setsid = shutil.which("setsid")
         print(f"SETSID: {setsid}")
-        python3 = subprocess.Popen(["which", "python3"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        stdout, stderr = python3.communicate(timeout=1)
-        python3 = stdout.strip()
+        python3 = shutil.which("python3")
         print(f"PYTHON3: {python3}")
         print(f"PWD: {self.pwd}")
-        failsafe = [setsid, python3, os.path.join(self.pwd, 'nft-failsafe.py'), str(int(self.failsafe_timer)), self.backup_file]
+        auth = subprocess.run(
+            ["sudo", "-v"],
+            check=False,
+        )
+
+        if auth.returncode != 0:
+            raise PermissionError(
+                "Could not authenticate failsafe"
+            )
+        failsafe = ["sudo", setsid, python3, os.path.join(self.pwd, 'nft-failsafe.py'), str(self.failsafe_timer), self.backup_file]
         program = subprocess.Popen(
             failsafe,
             stdin=subprocess.DEVNULL,

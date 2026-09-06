@@ -123,7 +123,7 @@ class Failsafe(object):
 			],
 		).returncode == 0
 
-		ruleset_result = subprocess.run(["sudo", self.nft, "list", "ruleset"], capture_output=True, text=True)
+		ruleset_result = subprocess.run([self.nft, "list", "ruleset"], capture_output=True, text=True)
 
 		ruleset_active = (
 				ruleset_result.returncode == 0
