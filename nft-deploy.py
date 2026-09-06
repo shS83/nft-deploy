@@ -137,11 +137,11 @@ class Deployer:
                 new_ruleset.append(custom_ruleset)
                 print(custom_ruleset)
                 if len(self.ports) > 0:
-                    print("\033[1;35m", end="")
-                    print(f"DEBUG (ports): {self.ports}")
+                    # print(f"DEBUG (ports): {self.ports}")
                     for port in self.ports:
-                        user_line = f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{self.comment or "User configured new open port"}\"\033[0m\n"
+                        user_line = f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{self.comment or "User configured new open port"}\"\033[0m"
                         user_ports.append(user_line)
+                        print("\033[0;35m", end="")
                         print(user_line)
                     print("\033[0m", end="")
             print("\033[1;37m", end="")
@@ -154,52 +154,87 @@ class Deployer:
         new_ruleset.append("# End of custom ruleset")
 
         print(f"Added no. of custom rule lines: {len(new_lines)}")
-        print("Cleaning up ruleset...")
         print("\033[1;34mAces!\033[0m")
         return "".join(final)
 
-
     def check_args(self):
+        action = None
 
-        for i, arg in enumerate(sys.argv[1:], start=1):
+        for i, arg in enumerate(self.args[1:], start=1):
             if not arg.startswith("--"):
                 continue
+
             match arg:
                 case "--port":
-                    if i + 1 < len(self.args) and self.args[i + 1].isdigit():
-                        self.ports.append(int(self.args[i + 1]) if self.args[i + 1].isdigit() else 0)
-                case "--dry-run":
-                    self.is_dry_run = True
-                    return self.dry_run()
-                case "--help":
-                    return self.help()
-                case "--deploy":
-                    return self.deploy()
-                case "--config":
-                    self.config_path = self.args[i + 1]
-                case "--file":
-                    self.custom_file = self.args[i + 1]
+                    if i + 1 >= len(self.args):
+                        raise SystemExit("--port needs a value")
+
                     try:
-                        if os.path.exists(self.custom_file):
-                            with open(self.custom_file, "r") as file:
-                                self.custom_ruleset = file.read()
-                    except Exception as e:
-                        raise SystemExit(f"Error: {e}")
-                case "--timer":
-                    if i + 1 < len(self.args) and self.args[i + 1]:
-                        try:
-                            self.failsafe_timer = int(self.args[i + 1])
-                        except ValueError:
-                            raise SystemExit("--timer needs a numerical value")
+                        port = int(self.args[i + 1])
+                    except ValueError:
+                        raise SystemExit("--port needs a numerical value")
+
+                    if not 1 <= port <= 65535:
+                        raise SystemExit("--port must be between 1 and 65535")
+
+                    self.ports.append(port)
+
                 case "--comment":
-                    if i + 1 < len(self.args):
-                        self.comment = self.args[i + 1]
+                    if i + 1 >= len(self.args):
+                        raise SystemExit("--comment needs a value")
+
+                    self.comment = self.args[i + 1]
+
+                case "--config":
+                    if i + 1 >= len(self.args):
+                        raise SystemExit("--config needs a filename")
+
+                    self.config_path = self.args[i + 1]
+
+                case "--file":
+                    if i + 1 >= len(self.args):
+                        raise SystemExit("--file needs a filename")
+
+                    self.custom_file = self.args[i + 1]
+
+                case "--timer":
+                    if i + 1 >= len(self.args):
+                        raise SystemExit("--timer needs a value")
+
+                    try:
+                        self.failsafe_timer = int(self.args[i + 1])
+                    except ValueError:
+                        raise SystemExit("--timer needs a numerical value")
+
+                case "--deploy":
+                    action = "deploy"
+
+                case "--dry-run":
+                    action = "dry-run"
+
                 case "--optimize":
-                    self.optimize()
+                    action = "optimize"
+
+                case "--help":
+                    action = "help"
+
                 case _:
-                    print("Invalid arguments")
-                    self.help()
-                    return 1
+                    raise SystemExit(f"Invalid argument: {arg}")
+
+        print(f"DEBUG ports: {self.ports}")
+
+        match action:
+            case "deploy":
+                return self.deploy()
+            case "dry-run":
+                return self.dry_run()
+            case "optimize":
+                return self.optimize()
+            case "help" | None:
+                return self.help()
+            case _:
+                print("Should have not been reached.")
+                return 1
         return 0
 
     def optimize(self):
@@ -212,6 +247,7 @@ class Deployer:
         stdout, stderr = program.communicate()
         print("optimized: ", stdout)
         print(stdout)
+        return stdout
 
     def test_rules(self, conf_filename: str = "") -> int:
         errors = []
