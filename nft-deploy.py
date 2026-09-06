@@ -177,13 +177,6 @@ class Deployer:
     def get_default_rules(self):
         ruleset = b'x\xda\x85Q\xcdj\x1c1\x0c\xbe\xfb)\xd4\r\xe4\xd4d\xa04=\x04r\xc81\x87B!O\xe0\xb55\x8c\xba\x1e\xcb\xc8\xda\x9d,a\xdf\xbd\xb2\xa7\x9b\xb4lJ/\xc6\xd6\xf7\'\xc9W\x9f\x86}\x95aKy\xc8\xa3\xc2\xcd\xe8\xae\xe0@\xf3}E\x05\xad\x0f_\xa0.v\xa0\xde;\x03\x9e~\x1c\xbe\x0ev|\x83g\x9aKB\xb8\x86g?"\x8c$\xb8\xf8\x94@\xf6\tMyk\xdc\xef,\x08\xf8\xe2\x1b\xaf\x02e\xe89u\xf2\x82-\xc9o\xad<\x80\xcf\xf1O rx\x07\xcf\xe2\xe1\xd6\xb9\x88U\x85\x8f\xd0!s\xb3\xeeFJ\x8a\xe2.*\xf0\xea\x00\xc2\xe4-\x92r\xd9k\x7f\x03\xe8\xb1\xe0\x9911\xef~\x83E\x88\x85\xf4x\xb6k\xd4\xc2\x89\xc2\x11\xa2pq\xbd\x10\x14\xaazm1\x07\x9f(v\x08\x02\xcf3f\x85\rzI+\x1dx|\xe3\x04\xce\x19\x83\x12\xe7\xba\xf9\xdb\xe5\xd5\x86\xb1\xae\xa9N\x18?\x83`\xb2b<\x81\x0f\x01\x8b\xbe\xdb\xdaBy\x01\x15\x1fv\xf8\x81\x1d\xd1\x98\xfd\x8c\xb0I\xbc\xb9\xd0>\xae\xef\xc4\xc1\xa7\x89\xab~ /6;+\x07N@a.\x97\x16=\xbeA\xab\xa0\xec\xb4\xef\xb0\xdb%\x9aIA\xda4wCEso\x1d\xees\xdb\xae\xe0OK\x82\x85t\xea\xf2\x97u\xf7>\xce\x94o,s\xa2-\xd9\xc0\xebNV\x8d\xddOo\xbf6\xb2,^\xe2\xbf\xfe\xed\x0c\xff\xef\xe7\x9a\xe5\xc9\xb9_\x9bb\xfb\xf8'
 
-        if self.custom_file != "":
-            try:
-                with open(self.custom_file, "r") as file:
-                    custom_ruleset = file.read()
-            except Exception as e:
-                raise SystemExit(f"Error: {e}")
-
         self.compressed_config = ruleset
         decompressed = zlib.decompress(self.compressed_config).decode("utf-8")
         return str(decompressed)
@@ -196,6 +189,12 @@ class Deployer:
     def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list = []) -> str:
         if custom_ruleset == "":
             custom_ruleset = self.get_promethean_rules()
+        file_rules = ""
+        if self.custom_file:
+            try:
+                file_rules = Path(self.custom_file).read_text()
+            except (OSError, UnicodeError) as error:
+                raise SystemExit(f"Cannot read custom rules {self.custom_file}: {error}") from error
         new_ruleset = []
         new_lines = []
         user_ports = []
@@ -205,7 +204,7 @@ class Deployer:
         print(f"Adding custom ruleset:\n{c.silver}")
         checked = 0
         for i, line in enumerate(ruleset):
-            if "pkttype" in line and custom_ruleset != "":
+            if line.lstrip().startswith("pkttype ") and checked == 0 and custom_ruleset != "":
                 first_line = int(i) if isinstance(i, int) else 0
                 print(f"{c.lime_green}", end="")
                 if checked == 0:
@@ -230,6 +229,14 @@ class Deployer:
                         print(user_line)
                     print("    # End of user configured ports\n")
                     new_ruleset.append("    # End of user configured ports\n")
+
+                if file_rules.strip():
+                    print(f"{c.lime_green}", end="")
+                    block = "    # Begin of file input rules\n" + "\n".join(
+                        "    " + rule for rule in file_rules.splitlines()
+                    ) + "\n    # End of file input rules"
+                    new_ruleset.append(block)
+                    print(block)
 
             print(f"{c.silver}", end="")
             print(line)
@@ -461,7 +468,7 @@ class Deployer:
         print(f"  {c.golden_orange}--help: {c.light_gold}Show this help message{c.reset}")
         print(f"  {c.golden_orange}--deploy: {c.light_gold}Deploy the default ruleset{c.reset}")
         print(f"  {c.golden_orange}--config: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
-        print(f"  {c.golden_orange}--file: {c.light_gold}Specify a custom ruleset file{c.reset}")
+        print(f"  {c.golden_orange}--file: {c.light_gold}Append input-chain rules from a file above pkttype (no table/chain wrapper){c.reset}")
         print(f"  {c.golden_orange}--port: {c.light_gold}Allow a specific port in the config from your personal local subnet{c.reset}")
         print(f"  {c.golden_orange}--comment: {c.light_gold}Comment to be added into the config file for your ports{c.reset}")
         print(f"  {c.golden_orange}--timer: {c.light_gold}failsafe timer in seconds (default: 60.0 seconds){c.reset}")
@@ -474,13 +481,36 @@ class Deployer:
         return 0
 
     def start_failsafe(self):
-        program = subprocess.Popen(
-            [sys.executable, "-u", str(Path(self.pwd) / "nft-failsafe.py"),
-             str(int(self.failsafe_timer)), self.backup_file,
-             "--config", self.config_path, "--wait-for-parent"],
-            stdin=subprocess.PIPE,
-            start_new_session=True,
-        )
+        terminal_fd = None
+        sudo_tty = os.environ.get("SUDO_TTY")
+        try:
+            if sudo_tty:
+                # sudo's own PTY may disappear when the deployer exits.
+                # Open the original terminal without acquiring it as a
+                # controlling terminal or truncating a non-terminal path.
+                try:
+                    terminal_fd = os.open(
+                        sudo_tty, os.O_WRONLY | os.O_NOCTTY | os.O_NOFOLLOW,
+                    )
+                    if not os.isatty(terminal_fd):
+                        raise OSError("SUDO_TTY does not point to a terminal")
+                except OSError as error:
+                    raise SystemExit(
+                        f"Cannot open failsafe terminal {sudo_tty}: {error}. "
+                        "Deployment aborted before changing the firewall."
+                    ) from error
+            program = subprocess.Popen(
+                [sys.executable, "-u", str(Path(self.pwd) / "nft-failsafe.py"),
+                 str(int(self.failsafe_timer)), self.backup_file,
+                 "--config", self.config_path, "--wait-for-parent"],
+                stdin=subprocess.PIPE,
+                stdout=terminal_fd,
+                stderr=terminal_fd,
+                start_new_session=True,
+            )
+        finally:
+            if terminal_fd is not None:
+                os.close(terminal_fd)
         print(f"Failsafe started with PID: {program.pid}", flush=True)
         return program
 

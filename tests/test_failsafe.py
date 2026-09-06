@@ -35,18 +35,60 @@ class FailsafeTests(unittest.TestCase):
         with patch.object(guard, 'run', side_effect=[result(), result(), result()]):
             self.assertFalse(guard.check_main_status())
 
-    def test_failed_restart_restores_backup_and_reports_deployment_failure(self):
+    def test_simulation_never_checks_or_changes_firewall(self):
+        guard = self.guard()
+        guard.simulate_failure = True
+        with patch.object(guard, 'check_main_status') as check, patch.object(guard, 'run') as run, patch.object(module.shutil, 'copyfile') as copy, patch('builtins.print') as output:
+            self.assertFalse(guard.activate_failsafe())
+            check.assert_not_called()
+            run.assert_not_called()
+            copy.assert_not_called()
+            self.assertIn('--rollback', output.call_args.args[0])
+
+    def test_failed_check_only_offers_rollback_command(self):
+        guard = self.guard()
+        with patch.object(guard, 'check_main_status', return_value=False), patch.object(guard, 'run') as run, patch.object(module.shutil, 'copyfile') as copy, patch('builtins.input') as prompt, patch('builtins.print') as output:
+            self.assertFalse(guard.activate_failsafe())
+            run.assert_not_called()
+            copy.assert_not_called()
+            prompt.assert_not_called()
+            self.assertIn('--rollback', output.call_args.args[0])
+
+    def test_confirmed_rollback_restores_and_verifies(self):
         with tempfile.TemporaryDirectory() as directory:
             backup = Path(directory) / 'backup'
             config = Path(directory) / 'config'
             backup.write_text('old rules')
             config.write_text('new rules')
             guard = self.guard(str(backup), str(config))
-            with patch.object(guard, 'check_main_status', side_effect=[False, True]), patch.object(guard, 'run', side_effect=[result(1), result(), result()]) as run:
-                self.assertFalse(guard.activate_failsafe())
+            with patch.object(module.sys.stdin, 'isatty', return_value=True), patch.object(module.os, 'tcgetpgrp', return_value=module.os.getpgrp()), patch('builtins.input', return_value='k'), patch.object(guard, 'check_main_status', return_value=True), patch.object(guard, 'run', side_effect=[result(), result(), result()]) as run:
+                self.assertTrue(guard.confirm_rollback())
                 self.assertEqual(config.read_text(), 'old rules')
                 self.assertEqual(backup.read_text(), 'old rules')
-                self.assertEqual(run.call_args_list[1].args[0], ['/usr/bin/nft', '-f', str(config)])
+                self.assertEqual(run.call_args_list[0].args[0], ['/usr/bin/nft', '-c', '-f', str(backup)])
+                self.assertEqual(run.call_args_list[2].args[0], ['systemctl', 'restart', 'nftables.service'])
+
+    def test_declined_or_empty_answer_does_not_change_firewall(self):
+        for answer in ('', 'e', 'unexpected'):
+            with self.subTest(answer=answer):
+                guard = self.guard()
+                with patch.object(module.sys.stdin, 'isatty', return_value=True), patch.object(module.os, 'tcgetpgrp', return_value=module.os.getpgrp()), patch('builtins.input', return_value=answer), patch.object(guard, 'run') as run, patch.object(module.shutil, 'copyfile') as copy:
+                    self.assertFalse(guard.confirm_rollback())
+                    run.assert_not_called()
+                    copy.assert_not_called()
+
+    def test_background_rollback_never_reads_input(self):
+        guard = self.guard()
+        with patch.object(module.sys.stdin, 'isatty', return_value=True), patch.object(module.os, 'tcgetpgrp', return_value=-1), patch('builtins.input') as prompt:
+            self.assertFalse(guard.confirm_rollback())
+            prompt.assert_not_called()
+
+    def test_invalid_backup_is_not_copied(self):
+        guard = self.guard()
+        with patch.object(module.sys.stdin, 'isatty', return_value=True), patch.object(module.os, 'tcgetpgrp', return_value=module.os.getpgrp()), patch('builtins.input', return_value='k'), patch.object(guard, 'run', return_value=result(1)) as run, patch.object(module.shutil, 'copyfile') as copy:
+            self.assertFalse(guard.confirm_rollback())
+            self.assertEqual(run.call_count, 1)
+            copy.assert_not_called()
 
     def test_countdown_only_shows_last_nine_seconds_and_all_symbols(self):
         guard = self.guard()
@@ -60,6 +102,8 @@ class FailsafeTests(unittest.TestCase):
         for frame, symbol in zip(frames[2:9], ('♹', '♸', '♷', '♶', '♵', '♴', '♳')):
             self.assertIn(symbol, frame)
             self.assertIn(str(module.c.gold), frame)
+        for frame, symbol, color in zip(frames[2:9], ('♹', '♸', '♷', '♶', '♵', '♴', '♳'), (module.c.lime_green,) * 3 + (module.c.yellow,) * 2 + (module.c.bright_red,) * 2):
+            self.assertIn(f'{color}{symbol}', frame)
         self.assertEqual(frames[-1], '')
 
     def test_overlay_preserves_cursor_and_avoids_last_column(self):
