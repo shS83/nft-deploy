@@ -7,8 +7,10 @@ from ipaddress import IPv4Interface
 from pyroute2 import IPRoute
 import shutil
 import time
+from pathlib import Path
 import re
 from colors import Color as c
+from datetime import datetime
 
 def get_default_network():
     with IPRoute() as ipr:
@@ -70,33 +72,108 @@ class Deployer:
         self.ports: list = []
         self.default_ruleset: str = ""
         self.custom_file: str = ""
-        self.dry_run_config: str = "/tmp/nft-dry-run-rules.conf"
+        self.dry_run_config: str | Path = "/tmp/nft-deploy/nft-dry-run-rules.conf"
         self.custom_ruleset: str = ""
         self.ruleset: str = ""
         self.comment: str | None = None
         self.compressed_config: bytes = b""
         self.failsafe_timer: float = 6.0
-        self.backup_file: str = ""
         self.user_home: str | None = os.getenv("HOME")
-        self.backup_file: str = "/tmp/nftables.conf.backup"
+        self.backup_file: str = "/tmp/nft-deploy/nftables.conf.backup"
         self.ports: list = []
         network = get_default_network()
         self.network: str | int | None | any = network.get("network", "127.0.0.1")
         self.bits: str | int | None | any = network.get("bits", "32")
         self.optimized: str | None = None
-
+        self.tmp_path: str = "/tmp/nft-deploy"
         self.nft = shutil.which("nft")
         if self.nft is None:
             raise FileNotFoundError(f"{c.crimson}nft is not installed.{c.reset}")
 
         print(f"DEBUG: {self.backup_file}")
 
-    def backup_first(self):
+    @staticmethod
+    def clean_old_backups(
+            backup_directory: Path,
+            keep: int = 3,
+    ) -> None:
+        backups = sorted(
+            (
+                path
+                for path in backup_directory.glob(
+                "nftables.conf.backup-*"
+            )
+                if path.is_file() and not path.is_symlink()
+            ),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+
+        for old_backup in backups[keep:]:
+            try:
+                old_backup.unlink()
+                print(
+                    f"{c.dark_gray}"
+                    f"Removed old backup: {old_backup}"
+                    f"{c.reset}"
+                )
+            except OSError as error:
+                print(
+                    f"{c.crimson}"
+                    f"Could not remove old backup "
+                    f"{old_backup}: "
+                    f"{c.wine_red}{error}"
+                    f"{c.reset}"
+                )
+
+    def backup_first(self) -> bool:
+        backup_directory = Path(self.tmp_path)
+
         try:
-            shutil.copy("/etc/nftables.conf", self.backup_file)
-        except (FileNotFoundError or psutil.AccessDenied or ValueError or EnvironmentError) as error:
-            print(f"Error: {error}")
-        print(f"{c.peach}Peaches{c.reset}.")
+            backup_directory.mkdir(
+                mode=0o700,
+                parents=True,
+                exist_ok=True,
+            )
+
+            timestamp = datetime.now().strftime(
+                "%d%m%Y-%H%M%S-%f"
+            )
+
+            backup_file = (
+                    backup_directory
+                    / f"nftables.conf.backup-{timestamp}"
+            )
+
+            shutil.copy2(
+                "/etc/nftables.conf",
+                backup_file,
+            )
+
+            # Failsafe tarvitsee uusimman backupin polun.
+            self.backup_file = str(backup_file)
+
+            self.clean_old_backups(
+                backup_directory,
+                keep=3,
+            )
+
+        except OSError as error:
+            print(
+                f"{c.crimson}"
+                f"Could not create nftables backup: "
+                f"{c.wine_red}{error}"
+                f"{c.reset}"
+            )
+            return False
+
+        print(
+            f"{c.peach}Peaches{c.reset}. "
+            f"Backup created: {backup_file}"
+        )
+
+        return True
+
 
     def get_default_rules(self):
         ruleset = b'x\xda\x85Q\xcdj\x1c1\x0c\xbe\xfb)\xd4\r\xe4\xd4d\xa04=\x04r\xc81\x87B!O\xe0\xb55\x8c\xba\x1e\xcb\xc8\xda\x9d,a\xdf\xbd\xb2\xa7\x9b\xb4lJ/\xc6\xd6\xf7\'\xc9W\x9f\x86}\x95aKy\xc8\xa3\xc2\xcd\xe8\xae\xe0@\xf3}E\x05\xad\x0f_\xa0.v\xa0\xde;\x03\x9e~\x1c\xbe\x0ev|\x83g\x9aKB\xb8\x86g?"\x8c$\xb8\xf8\x94@\xf6\tMyk\xdc\xef,\x08\xf8\xe2\x1b\xaf\x02e\xe89u\xf2\x82-\xc9o\xad<\x80\xcf\xf1O rx\x07\xcf\xe2\xe1\xd6\xb9\x88U\x85\x8f\xd0!s\xb3\xeeFJ\x8a\xe2.*\xf0\xea\x00\xc2\xe4-\x92r\xd9k\x7f\x03\xe8\xb1\xe0\x9911\xef~\x83E\x88\x85\xf4x\xb6k\xd4\xc2\x89\xc2\x11\xa2pq\xbd\x10\x14\xaazm1\x07\x9f(v\x08\x02\xcf3f\x85\rzI+\x1dx|\xe3\x04\xce\x19\x83\x12\xe7\xba\xf9\xdb\xe5\xd5\x86\xb1\xae\xa9N\x18?\x83`\xb2b<\x81\x0f\x01\x8b\xbe\xdb\xdaBy\x01\x15\x1fv\xf8\x81\x1d\xd1\x98\xfd\x8c\xb0I\xbc\xb9\xd0>\xae\xef\xc4\xc1\xa7\x89\xab~ /6;+\x07N@a.\x97\x16=\xbeA\xab\xa0\xec\xb4\xef\xb0\xdb%\x9aIA\xda4wCEso\x1d\xees\xdb\xae\xe0OK\x82\x85t\xea\xf2\x97u\xf7>\xce\x94o,s\xa2-\xd9\xc0\xebNV\x8d\xddOo\xbf6\xb2,^\xe2\xbf\xfe\xed\x0c\xff\xef\xe7\x9a\xe5\xc9\xb9_\x9bb\xfb\xf8'
@@ -252,7 +329,13 @@ class Deployer:
         return 0
 
     def optimize(self):
-        self.backup_first()
+        if not self.backup_first():
+            print(
+                f"{c.bright_red}"
+                f"Optimizing aborted because backup failed."
+                f"{c.reset}"
+            )
+            return 1
 
         print(f"{c.white}Optimizing {c.indigo}stuff:{c.reset}")
 
@@ -318,7 +401,13 @@ class Deployer:
         return 0
 
     def deploy(self):
-        self.backup_first()
+        if not self.backup_first():
+            print(
+                f"{c.bright_red}"
+                f"Deployment aborted because backup failed."
+                f"{c.reset}"
+            )
+            return 1
         if self.ruleset == "":
             self.ruleset = self.get_default_rules()
             self.custom_ruleset = self.get_promethean_rules()
@@ -351,7 +440,13 @@ class Deployer:
         return 0
 
     def dry_run(self) -> int:
-        self.backup_first()
+        if not self.backup_first():
+            print(
+                f"{c.bright_red}"
+                f"Dry-run detected an error with the backup, but continues still."
+                f"{c.reset}"
+            )
+
         if os.path.exists(self.backup_file):
             print(f"Backed up existing config file to: {c.dark_purple}{self.backup_file}{c.reset}")
         else:
