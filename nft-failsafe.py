@@ -174,12 +174,31 @@ class Failsafe(object):
 
 if __name__ == "__main__":
 	print(f"{c.light_salmon}PING{c.reset}")
-	if len(sys.argv) > 0:
-		if (timer := sys.argv[1]).isdigit():
-			backup_file = sys.argv[2]
-		else:
-			backup_file = "/tmp/nftables.conf.backup"
-		failsafe = Failsafe(failsafe_timer=int(timer), command="echo [failsafe] DONG!", backupfile=backup_file)
-		failsafe.activate_failsafe()
 
-	sys.exit(0)
+	if len(sys.argv) < 3:
+		raise SystemExit(
+			"Usage: nft-failsafe.py TIMER BACKUP_FILE"
+		)
+
+	try:
+		timer = int(sys.argv[1])
+	except ValueError:
+		raise SystemExit(
+			"Failsafe timer must be an integer"
+		)
+
+	if timer < 0:
+		raise SystemExit(
+			"Failsafe timer cannot be negative"
+		)
+
+	backup_file = sys.argv[2]
+
+	failsafe = Failsafe(
+		failsafe_timer=timer,
+		command="echo [failsafe] DONG!",
+		backupfile=backup_file,
+	)
+
+	success = failsafe.activate_failsafe()
+	sys.exit(0 if success else 1)

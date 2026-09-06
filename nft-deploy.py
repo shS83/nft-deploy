@@ -510,9 +510,18 @@ class Deployer:
             raise PermissionError(
                 "Could not authenticate failsafe"
             )
-        failsafe = ["sudo", setsid, python3, os.path.join(self.pwd, 'nft-failsafe.py'), str(self.failsafe_timer), self.backup_file]
+
+        failsafe_command = [
+            "sudo",
+            "-n",
+            python3,
+            os.path.join(self.pwd, "nft-failsafe.py"),
+            str(int(self.failsafe_timer)),
+            str(self.backup_file),
+        ]
+
         program = subprocess.Popen(
-            failsafe,
+            failsafe_command,
             stdin=subprocess.DEVNULL,
             stdout=None,
             stderr=None,
@@ -522,14 +531,18 @@ class Deployer:
 
         time.sleep(0.2)
 
-        if program.poll() is False:
+        returncode = program.poll()
+
+        if returncode is not None:
             raise RuntimeError(
-                f"Failsafe ended abruptly: {program.returncode}"
+                f"Failsafe ended abruptly: {returncode}"
             )
 
-        print(f"Failsafe started with PID: {program.pid}", flush=True)
-        if program.poll() is False:
-            print(errors := "Failsafe didn't start")
+        print(
+            f"Failsafe started with PID: {program.pid}",
+            flush=True,
+        )
+
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
                 cmdline = proc.info["cmdline"] or []
