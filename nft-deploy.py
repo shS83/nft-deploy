@@ -8,6 +8,7 @@ from pyroute2 import IPRoute
 import shutil
 import time
 import re
+from colors import Color as c
 
 def get_default_network():
     with IPRoute() as ipr:
@@ -24,7 +25,7 @@ def get_default_network():
 
         if interface_index is None:
             raise RuntimeError(
-                f"Default route has no exit node: {route}"
+                f"{c.crimson}Default route has no exit node: {c.bright_red}{route}{c.reset}"
             )
 
         link = ipr.get_links(interface_index)[0]
@@ -55,7 +56,7 @@ def get_default_network():
                 }
 
         raise RuntimeError(
-            f"Your {interface_name} does not have a local address."
+            f"{c.crimson}Your {c.light_lime}{interface_name}{c.crimson} does not have a local address.{c.reset}"
         )
 
 class Deployer:
@@ -82,12 +83,12 @@ class Deployer:
         network = get_default_network()
         self.network: str | int | None | any = network.get("network", "127.0.0.1")
         self.bits: str | int | None | any = network.get("bits", "32")
-        program = subprocess.Popen(["which", "nft"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        stdout, stderr = program.communicate()
-        if program.returncode != 0:
-            print(f"Errors: {stderr}')")
+        self.optimized: str | None = None
 
-        self.nft = stdout.replace("\n", "")
+        self.nft = shutil.which("nft")
+        if self.nft is None:
+            raise FileNotFoundError(f"{c.crimson}nft is not installed.{c.reset}")
+
         print(f"DEBUG: {self.backup_file}")
 
     def backup_first(self):
@@ -95,23 +96,17 @@ class Deployer:
             shutil.copy("/etc/nftables.conf", self.backup_file)
         except (FileNotFoundError or psutil.AccessDenied or ValueError or EnvironmentError) as error:
             print(f"Error: {error}")
-        print("\033[1;38mPeaches\033[0m.")
+        print(f"{c.peach}Peaches{c.reset}.")
 
     def get_default_rules(self):
         ruleset = b'x\xda\x85Q\xcdj\x1c1\x0c\xbe\xfb)\xd4\r\xe4\xd4d\xa04=\x04r\xc81\x87B!O\xe0\xb55\x8c\xba\x1e\xcb\xc8\xda\x9d,a\xdf\xbd\xb2\xa7\x9b\xb4lJ/\xc6\xd6\xf7\'\xc9W\x9f\x86}\x95aKy\xc8\xa3\xc2\xcd\xe8\xae\xe0@\xf3}E\x05\xad\x0f_\xa0.v\xa0\xde;\x03\x9e~\x1c\xbe\x0ev|\x83g\x9aKB\xb8\x86g?"\x8c$\xb8\xf8\x94@\xf6\tMyk\xdc\xef,\x08\xf8\xe2\x1b\xaf\x02e\xe89u\xf2\x82-\xc9o\xad<\x80\xcf\xf1O rx\x07\xcf\xe2\xe1\xd6\xb9\x88U\x85\x8f\xd0!s\xb3\xeeFJ\x8a\xe2.*\xf0\xea\x00\xc2\xe4-\x92r\xd9k\x7f\x03\xe8\xb1\xe0\x9911\xef~\x83E\x88\x85\xf4x\xb6k\xd4\xc2\x89\xc2\x11\xa2pq\xbd\x10\x14\xaazm1\x07\x9f(v\x08\x02\xcf3f\x85\rzI+\x1dx|\xe3\x04\xce\x19\x83\x12\xe7\xba\xf9\xdb\xe5\xd5\x86\xb1\xae\xa9N\x18?\x83`\xb2b<\x81\x0f\x01\x8b\xbe\xdb\xdaBy\x01\x15\x1fv\xf8\x81\x1d\xd1\x98\xfd\x8c\xb0I\xbc\xb9\xd0>\xae\xef\xc4\xc1\xa7\x89\xab~ /6;+\x07N@a.\x97\x16=\xbeA\xab\xa0\xec\xb4\xef\xb0\xdb%\x9aIA\xda4wCEso\x1d\xees\xdb\xae\xe0OK\x82\x85t\xea\xf2\x97u\xf7>\xce\x94o,s\xa2-\xd9\xc0\xebNV\x8d\xddOo\xbf6\xb2,^\xe2\xbf\xfe\xed\x0c\xff\xef\xe7\x9a\xe5\xc9\xb9_\x9bb\xfb\xf8'
-        custom_ruleset = self.get_promethean_rules()
+
         if self.custom_file != "":
             try:
                 with open(self.custom_file, "r") as file:
                     custom_ruleset = file.read()
             except Exception as e:
                 raise SystemExit(f"Error: {e}")
-
-        if custom_ruleset != "":
-            # self.ruleset = self.merge_ruleset(str(zlib.decompress(ruleset).decode("utf-8")), custom_ruleset)
-            if len(self.ports) > 0:
-                userconfig = [f"ip saddr {self.network}/{self.bits} tcp dport {port} ct state new accept comment \"{"User configured new open port" or self.comment}\"" for port in self.ports]
-                self.ruleset = self.merge_ruleset(self.ruleset, "\n".join(userconfig))
 
         self.compressed_config = ruleset
         decompressed = zlib.decompress(self.compressed_config).decode("utf-8")
@@ -125,36 +120,58 @@ class Deployer:
     def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list = []) -> str:
         if custom_ruleset == "":
             custom_ruleset = self.get_promethean_rules()
-        new_ruleset = ["# Begin of custom ruleset"]
+        new_ruleset = []
         new_lines = []
         user_ports = []
         ruleset = ruleset.split("\n")
-        print("Adding custom ruleset:\n\033[1;37m")
+        first_line = 0
+
+        print(f"Adding custom ruleset:\n{c.silver}")
+        checked = 0
         for i, line in enumerate(ruleset):
             if "pkttype" in line and custom_ruleset != "":
-                new_lines.append("".join([str(i + n) for n, _ in enumerate(custom_ruleset.split("\n"))]))
-                print("\033[1;32m", end="")
+                first_line = int(i) if isinstance(i, int) else 0
+                print(f"{c.lime_green}", end="")
+                if checked == 0:
+                    print("\n    # Begin of custom ruleset")
+                    new_ruleset.append("\n    # Begin of custom ruleset")
+                    checked = 1
                 new_ruleset.append(custom_ruleset)
                 print(custom_ruleset)
                 if len(self.ports) > 0:
                     # print(f"DEBUG (ports): {self.ports}")
                     for port in self.ports:
-                        user_line = f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{self.comment or "User configured new open port"}\"\033[0m"
+                        if checked == 1:
+                            print("    # End of custom ruleset\n")
+                            new_ruleset.append("    # End of custom ruleset\n")
+                            print(f"{c.bright_aqua}", end="")
+                            print ("    # Begin of user configured ports")
+                            new_ruleset.append("    # Begin of user configured ports")
+                            checked = 2
+                        user_line = f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{self.comment or "User configured new open port"}\""
                         user_ports.append(user_line)
-                        print("\033[0;35m", end="")
+                        new_ruleset.append(user_line)
                         print(user_line)
-                    print("\033[0m", end="")
-            print("\033[1;37m", end="")
+                    print("    # End of user configured ports\n")
+                    new_ruleset.append("    # End of user configured ports\n")
+
+            print(f"{c.silver}", end="")
             print(line)
                 # new_ruleset.append(userconfig.rstrip())
             new_ruleset.append(line)
-        print("# End of custom ruleset")
-        print("\033[0m", end="")
-        new_ruleset.append("# End of custom ruleset")
 
-        print(f"Added no. of custom rule lines: {len(new_lines)} -- {new_lines}")
-        print("\033[1;34mAces!\033[0m")
-        return "\n".join(new_ruleset) + "\n"
+        custom_line_count = len(custom_ruleset.splitlines())
+        first_line += 1
+
+        new_lines.extend(
+            range(first_line, first_line + custom_line_count)
+        )
+
+        print(f"{c.reset}", end="")
+
+        print(f"Added no. of custom rule lines: {c.bright_aqua}{len(new_lines)}, lines: {", ".join(str(x) for x in new_lines)}{c.reset}")
+        print(f"{c.deep_purple}Aces!{c.reset}")
+        return "\n".join(new_ruleset)
 
     def check_args(self):
         action = None
@@ -166,44 +183,44 @@ class Deployer:
             match arg:
                 case "--port":
                     if i + 1 >= len(self.args):
-                        raise SystemExit("--port needs a value")
+                        raise SystemExit(f"{self.colors.get('crimson')}--port needs a value{self.colors.get('reset')}")
 
                     try:
                         port = int(self.args[i + 1])
                     except ValueError:
-                        raise SystemExit("--port needs a numerical value")
+                        raise SystemExit(f"{self.colors.get('crimson')}--port needs a numerical value{self.colors.get('reset')}")
 
                     if not 1 <= port <= 65535:
-                        raise SystemExit("--port must be between 1 and 65535")
+                        raise SystemExit(f"{self.colors.get('crimson')}--port must be between 1 and 65535{self.colors.get('reset')}")
 
                     self.ports.append(port)
 
                 case "--comment":
                     if i + 1 >= len(self.args):
-                        raise SystemExit("--comment needs a value")
+                        raise SystemExit(f"{self.colors.get('crimson')}--comment needs a value{self.colors.get('reset')}")
 
                     self.comment = self.args[i + 1]
 
                 case "--config":
                     if i + 1 >= len(self.args):
-                        raise SystemExit("--config needs a filename")
+                        raise SystemExit(f"{self.colors.get('crimson')}--config needs a filename{self.colors.get('reset')}")
 
                     self.config_path = self.args[i + 1]
 
                 case "--file":
                     if i + 1 >= len(self.args):
-                        raise SystemExit("--file needs a filename")
+                        raise SystemExit(f"{self.colors.get('crimson')}--file needs a filename{self.colors.get('reset')}")
 
                     self.custom_file = self.args[i + 1]
 
                 case "--timer":
                     if i + 1 >= len(self.args):
-                        raise SystemExit("--timer needs a value")
+                        raise SystemExit(f"{self.colors.get('crimson')}--timer needs a value{self.colors.get('reset')}")
 
                     try:
                         self.failsafe_timer = int(self.args[i + 1])
                     except ValueError:
-                        raise SystemExit("--timer needs a numerical value")
+                        raise SystemExit(f"{self.colors.get('crimson')}--timer needs a numerical value{self.colors.get('reset')}")
 
                 case "--deploy":
                     action = "deploy"
@@ -218,9 +235,7 @@ class Deployer:
                     action = "help"
 
                 case _:
-                    raise SystemExit(f"Invalid argument: {arg}")
-
-        print(f"DEBUG ports: {self.ports}")
+                    raise SystemExit(f"Invalid argument: {c.crimson}{arg}")
 
         match action:
             case "deploy":
@@ -232,21 +247,46 @@ class Deployer:
             case "help" | None:
                 return self.help()
             case _:
-                print("Should have not been reached.")
+                print(f"{c.crimson}This should have never been reached.{c.reset}")
                 return 1
         return 0
 
     def optimize(self):
         self.backup_first()
-        print("Optimizing \033[1;31mstuff\033[0m")
-        program = subprocess.Popen(["sudo", self.nft, "-c", "-o", "-f", self.config_path], stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True)
-        print("self.config_path: ", self.config_path)
-        print("self.nft: ", self.nft)
-        stdout, stderr = program.communicate()
-        print("optimized: ", stdout)
-        print(stdout)
-        return stdout
+
+        print(f"{c.white}Optimizing {c.indigo}stuff:{c.reset}")
+
+        program = subprocess.run(
+            [
+                "sudo",
+                self.nft,
+                "-c",
+                "-o",
+                "-f",
+                self.config_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if program.stdout:
+            print(f"{c.golden_orange}Optimized rules:{c.reset}")
+            print(program.stdout, end="")
+            self.optimized = program.stdout
+
+        if program.stderr:
+            print(f"{c.light_gold}Optimization report:{c.reset}")
+            print(program.stderr, end="")
+
+        if program.returncode != 0:
+            print(
+                f"{c.crimson}Optimization failed with return code "
+                f"{c.bright_red}{program.returncode}{c.reset}"
+            )
+            return 1
+
+        return 0
 
     def test_rules(self, conf_filename: str = "") -> int:
         errors = []
@@ -299,50 +339,52 @@ class Deployer:
             print(stderr)
         if program.returncode != 0:
             print("Something went wrong, sorry mate.")
-        program = subprocess.Popen(["sudo", "cp", "-v", "/tmp/nftables.conf", "/etc/nftables.conf"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        program = subprocess.Popen(["sudo", "cp", "-b", "-v", "/tmp/nftables.conf", "/etc/nftables.conf"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         stdout, stderr = program.communicate(timeout=10)
         if len(stdout.strip()) > 0:
             print(stdout)
             print(stderr)
         if program.returncode != 0:
             print("Something went wrong, sorry mate.")
-        print("Done. New configuration can be found in /etc/nftables.conf.")
-        print("I've been \033[1;31mdeployed\033[0m.")
+        print(f"Done. New configuration can be found in {c.lime_yellow}/etc/nftables.conf{c.reset}.")
+        print(f"I've been {c.light_salmon}deployed{c.reset}")
         return 0
 
     def dry_run(self) -> int:
         self.backup_first()
         if os.path.exists(self.backup_file):
-            print(f"Backed up existing config file to: \033[1;32m{self.backup_file}\033[0m")
+            print(f"Backed up existing config file to: {c.dark_purple}{self.backup_file}{c.reset}")
         else:
-            print("\033[1;31mBackup failed\033[0m. Please check your permissions.")
+            print(f"{c.crimson}Backup failed{c.reset}. Please check your permissions.")
             return 1
         self.ruleset = self.get_default_rules()
         self.custom_ruleset = self.get_promethean_rules()
         self.ruleset = self.merge_ruleset(self.ruleset, self.custom_ruleset)
-        print(f"\nWould save it in: \033[1;33m{self.config_path}\033[0m\n")
+        print(f"\nWould save it in: {c.amethyst}{self.config_path}{c.reset}\n")
         with open(self.dry_run_config, "w") as f:
             f.write(self.ruleset)
-        print(f"Wrote config file to: \033[1;34m{self.dry_run_config}\033[0m")
+        print(f"Wrote config file to: {c.bright_pink}{self.dry_run_config}{c.reset}")
         passable = self.test_rules(self.dry_run_config)
         if passable != 0:
-            print("This was tested and something is really broken, sorry mate.")
+            print(f"{c.crimson}This was tested and something is really broken, sorry mate.")
             return 1
         return 2
 
     @staticmethod
     def help():
-        print("Usage: nft-deploy.py [options]")
+        print(f"{c.dark_purple}NFT Deployer {c.white}-- {c.deep_purple}failsafe guard for updating nftables configs {c.reset}")
+        print()
+        print(f"Usage: {c.light_gold}nft-deploy.py {c.bright_green}[options]{c.reset}")
         print("Options:")
         print()
-        print("  --dry-run: Do not actually deploy anything")
-        print("  --help: Show this help message")
-        print("  --deploy: Deploy the default ruleset")
-        print("  --config: Specify your nftables.conf location (default: /etc/nftables.conf)")
-        print("  --file: Specify a custom ruleset file")
-        print("  --port: Allow a specific port in the config from your personal local subnet")
-        print("  --comment: Comment to be added into the config file for your ports")
-        print("  --timer: failsafe timer in seconds (default: 60.0 seconds)")
+        print(f"  {c.golden_orange}--dry-run: {c.light_gold}Do not actually deploy anything{c.reset}")
+        print(f"  {c.golden_orange}--help: {c.light_gold}Show this help message{c.reset}")
+        print(f"  {c.golden_orange}--deploy: {c.light_gold}Deploy the default ruleset{c.reset}")
+        print(f"  {c.golden_orange}--config: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
+        print(f"  {c.golden_orange}--file: {c.light_gold}Specify a custom ruleset file{c.reset}")
+        print(f"  {c.golden_orange}--port: {c.light_gold}Allow a specific port in the config from your personal local subnet{c.reset}")
+        print(f"  {c.golden_orange}--comment: {c.light_gold}Comment to be added into the config file for your ports{c.reset}")
+        print(f"  {c.golden_orange}--timer: {c.light_gold}failsafe timer in seconds (default: 60.0 seconds){c.reset}")
         print()
         quit()
 
@@ -351,7 +393,7 @@ class Deployer:
             return 1
         return 0
 
-    def main(self):
+    def main(self, dry_run : bool = False):
         error: object
         result = self.check_env()
         matches = []
@@ -380,13 +422,13 @@ class Deployer:
 
         time.sleep(0.2)
 
-        if program.poll() is not None:
+        if program.poll() is False:
             raise RuntimeError(
                 f"Failsafe ended abruptly: {program.returncode}"
             )
 
         print(f"Failsafe started with PID: {program.pid}", flush=True)
-        if "Aces." not in stdout:
+        if program.poll() is False:
             print(errors := "Failsafe didn't start")
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
@@ -416,12 +458,16 @@ if __name__ == "__main__":
         process.help()
     elif len(arguments) > 1:
         print("Starting...")
-        if returned := process.check_args() == 0:
+        if (returned := process.check_args()) == 0:
             process.main()
         elif returned == 1:
             process.help()
         elif returned == 2:
-            print("Dry run finished succesfully. No changes were made to the config file...")
+            print(
+                "Dry run finished successfully. "
+                "No changes were made to the config file."
+            )
+            process.main(dry_run=True)
 
     if str(process).isdigit():
         sys.exit(1)
