@@ -130,26 +130,32 @@ class Deployer:
         user_ports = []
         final = []
         ruleset = ruleset.split("\n")
+        print("Adding custom ruleset:\n\033[1;37m")
         for i, line in enumerate(ruleset):
             if "pkttype" in line and custom_ruleset != "":
-                new_ruleset.append(f"\033[1;36m{custom_ruleset}\033[1;37m")
+                print("\033[1;32m", end="")
+                new_ruleset.append(custom_ruleset)
+                print(custom_ruleset)
                 if len(self.ports) > 0:
-                    user_ports.append("\033[1;35m")
+                    print("\033[1;35m", end="")
+                    print(f"DEBUG (ports): {self.ports}")
                     for port in self.ports:
-                        user_ports.append("".join(f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{"User configured new open port" or self.comment}\"\033[0m\n"))
-                    user_ports.append("\033[0m")
+                        user_line = f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{self.comment or "User configured new open port"}\"\033[0m\n"
+                        user_ports.append(user_line)
+                        print(user_line)
+                    print("\033[0m", end="")
+            print("\033[1;37m", end="")
+            print(line)
                 # new_ruleset.append(userconfig.rstrip())
             new_lines.append(i)
             new_ruleset.append(line)
+        print("# End of custom ruleset")
+        print("\033[0m", end="")
         new_ruleset.append("# End of custom ruleset")
+
         print(f"Added no. of custom rule lines: {len(new_lines)}")
-        printable = str("\n".join(new_ruleset))
-        print("\033[1;34mAces!\033[0m")
-        print(f"Added custom ruleset: \n\033[1;37m{printable}\033[0m\n")
         print("Cleaning up ruleset...")
-        for rule in new_ruleset:
-            final.append(re.sub(re.compile(r"\\033\[.*m$"), rule, ""))
-        print(f"Final draft: {final}")
+        print("\033[1;34mAces!\033[0m")
         return "".join(final)
 
 
