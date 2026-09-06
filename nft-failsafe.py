@@ -23,9 +23,23 @@ class Failsafe(object):
 		program = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 		stdout, stderr = program.communicate(timeout=1)
 
-	def countdown(self, custom_time: int) -> None:
+	def print_above_prompt(self, text: str) -> None:
+		self.errors = False
+		print(
+			"\033[s"  # Save current cursor position
+			"\033[1A"  # Move one line up
+			"\r"  # Move to beginning of line
+			"\033[2K"  # Clear entire line
+			f"{text}"
+			"\033[u",  # Restore cursor position
+			end="",
+			flush=True,
+		)
+
+	def countdown(self) -> None:
 		symbols = ("♹", "♸", "♷", "♶", "♵", "♴", "♳")
-		deadline = time.monotonic() + (custom_time or self.timer)
+		deadline = time.monotonic() + self.timer
+		previous_second = None
 
 		while True:
 			remaining = deadline - time.monotonic()
@@ -35,37 +49,33 @@ class Failsafe(object):
 
 			seconds = math.ceil(remaining)
 
-			if 1 <= seconds <= 7:
-				symbol = symbols[7 - seconds]
+			# Päivitetään terminaali vain sekunnin vaihtuessa.
+			if seconds != previous_second:
+				previous_second = seconds
 
-				if seconds >= 5:
-					color = c.bright_green
-				elif seconds >= 3:
-					color = c.gold
-				else:
-					color = c.bright_red
+				symbol = (
+					symbols[7 - seconds]
+					if 1 <= seconds <= 7
+					else ""
+				)
 
-				icon = f" {color}{symbol}{c.reset}"
-			else:
-				icon = ""
-
-			print(
-				f"\rFailsafe activates in {seconds:>3} seconds{icon}",
-				end="",
-				flush=True,
-			)
+				self.print_above_prompt(
+					f"{c.gold}Failsafe in {seconds:>3} seconds "
+					f"{c.peach}{symbol}{c.reset}"
+				)
 
 			time.sleep(min(0.1, remaining))
 
-		print(
-			f"\r{c.deep_purple}Failsafe activated! ⚛{c.reset}"
-			"                          ",
-			flush=True,
+		self.print_above_prompt(
+			f"{c.deep_purple}Failsafe activated! ⚛{c.reset}"
 		)
 
 	def activate_failsafe(self) -> bool:
-		print(f"Activating failsafe in {self.timer} seconds...")
+		print(f"Activating failsafe in {self.timer} seconds... ", end="")
+		time.sleep(2)
+		print(self.timer)
 		self.countdown(int(self.timer))
+		print()
 		print("Failsafe activated. Checking process status...")
 		status, error = self.check_main_status()
 		if not status:
@@ -102,22 +112,17 @@ class Failsafe(object):
 			],
 		).returncode == 0
 
-		ruleset_result = subprocess.run(
-			[self.nft, "list", "ruleset"],
-			capture_output=True,
-			text=True,
-		)
+		ruleset_result = subprocess.run([self.nft, "list", "ruleset"], capture_output=True, text=True)
 
 		ruleset_active = (
 				ruleset_result.returncode == 0
 				and "table inet filter" in ruleset_result.stdout
 		)
 
-		print(f"systemd service active: {service_active}")
-		print(f"nftables ruleset loaded: {ruleset_active}")
-
-		print(f"{c.silver}DEBUG (nft enabled): {c.cobalt}{enabled}")
-		print(f"{c.silver}DEBUG (nft active): {c.lime_green}{active}")
+		print(f"{c.white}Systemd service enabled: {c.lime_green if enabled else c.crimson}{enabled}")
+		print(f"{c.white}Systemd service active: {c.lime_green if service_active else c.crimson}{service_active}")
+		print(f"{c.white}Nftables ruleset loaded: {c.lime_green if ruleset_active else c.crimson}{ruleset_active}")
+		print(f"{c.white}Comprehensive system status: {c.bright_green}{service_active and ruleset_active and enabled}{c.reset}")
 
 		if not enabled:
 			print("The process is not running. Trying to restart it.")
