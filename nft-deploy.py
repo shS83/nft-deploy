@@ -16,7 +16,7 @@ def get_default_network():
         routes = ipr.get_default_routes(family=2)  # AF_INET / IPv4
 
         if not routes:
-            raise RuntimeError("IPv4-default route not found.")
+            raise RuntimeError(f"{c.crimson}IPv4-default route not found.{c.reset}")
 
         route = routes[0]
         attributes = dict(route["attrs"])
@@ -187,14 +187,16 @@ class Deployer:
         return zlib.decompress(basic_ruleset).decode("utf-8")
 
     def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list = []) -> str:
-        if custom_ruleset == "":
-            custom_ruleset = self.get_promethean_rules()
+        # if custom_ruleset == "":
+        #    custom_ruleset = self.get_promethean_rules()
         file_rules = ""
         if self.custom_file:
             try:
                 file_rules = Path(self.custom_file).read_text()
             except (OSError, UnicodeError) as error:
                 raise SystemExit(f"Cannot read custom rules {self.custom_file}: {error}") from error
+        else:
+            file_rules = self.get_promethean_rules()
         new_ruleset = []
         new_lines = []
         user_ports = []
@@ -397,8 +399,8 @@ class Deployer:
             return 1
         if self.check_env() != 0 or not self.backup_first():
             return 1
-        if not self.ruleset:
-            self.ruleset = self.merge_ruleset(self.get_default_rules(), self.get_promethean_rules())
+        # if not self.ruleset:
+         #   self.ruleset = self.merge_ruleset(self.get_default_rules(), self.get_promethean_rules())
         candidate = Path(self.backup_file + ".candidate")
         candidate.write_text(self.ruleset)
         try:
@@ -445,8 +447,12 @@ class Deployer:
             print(f"{c.crimson}Backup failed{c.reset}. Please check your permissions.")
             return 1
         self.ruleset = self.get_default_rules()
-        self.custom_ruleset = self.get_promethean_rules()
-        self.ruleset = self.merge_ruleset(self.ruleset, self.custom_ruleset)
+        # self.custom_ruleset = self.get_promethean_rules()
+        if self.custom_file:
+            with open(self.custom_file, 'r') as f:
+                file_contents = f.read()
+            self.ruleset = self.merge_ruleset(self.ruleset, file_contents)
+        # self.ruleset = self.merge_ruleset(self.ruleset, self.custom_ruleset)
         print(f"\nWould save it in: {c.amethyst}{self.config_path}{c.reset}\n")
         with open(self.dry_run_config, "w") as f:
             f.write(self.ruleset)

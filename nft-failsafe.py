@@ -62,7 +62,6 @@ class Failsafe:
                 "Countdown duration cannot be negative"
             )
 
-        symbols = ("♹", "♸", "♷", "♶", "♵", "♴", "♳")
         deadline = time.monotonic() + duration
         previous_second = None
 
@@ -74,11 +73,9 @@ class Failsafe:
                 seconds = math.ceil(remaining)
                 if seconds < 10 and seconds != previous_second:
                     previous_second = seconds
-                    symbol = symbols[7 - seconds] if 1 <= seconds <= 7 else ""
-                    symbol_color = c.bright_red if seconds <= 2 else c.yellow if seconds <= 4 else c.lime_green
+                    color = c.bright_red if seconds <= 2 else c.yellow if seconds <= 4 else c.lime_green
                     self.print_above_prompt(
-                        f"{c.gold}Failsafe in {seconds:>3} seconds "
-                        f"{symbol_color}{symbol}{c.reset}"
+                        f"{c.gold}Failsafe in {color}{seconds:>3} seconds{c.reset}"
                     )
                 time.sleep(min(0.1, remaining))
         finally:
@@ -135,7 +132,7 @@ class Failsafe:
         print(f"{c.white}Backup: {c.amethyst}{self.backup_file}\n{c.white}Restore point: {c.coral}{self.config_file}", flush=True)
         try:
             answer = input(
-                f"Do you want to restore the backup and restart nftables? [{c.green}y{c.reset}/{c.bright_red}N{c.reset}] "
+                f"Do you want to restore the backup and restart {c.bright_green}nftables{c.reset}? [{c.green}y{c.reset}/{c.bright_red}N{c.reset}] "
             ).strip().casefold()
         except (EOFError, KeyboardInterrupt):
             answer = ""
@@ -144,7 +141,7 @@ class Failsafe:
             return False
         # Validate the backup before replacing the current configuration.
         if self.run([self.nft, "-c", "-f", self.backup_file]).returncode != 0:
-            print("Backup verification failed. No rollback was done.", flush=True)
+            print(f"{c.crimson}Backup verification failed. No rollback was done.{c.reset}", flush=True)
             return False
         print(f"Restoring backup: {self.backup_file}", flush=True)
         shutil.copyfile(self.backup_file, self.config_file)
@@ -152,9 +149,9 @@ class Failsafe:
         restart = self.run(["systemctl", "restart", "nftables.service"])
         healthy = self.check_main_status()
         if restored.returncode == 0 and restart.returncode == 0 and healthy:
-            print("Backup restored and firewall verified.", flush=True)
+            print(f"{c.green}Backup restored and firewall verified.{c.reset}", flush=True)
             return True
-        print("ERROR: Firewall recovery failed. Manual intervention required.", flush=True)
+        print(f"{c.crimson}ERROR:{c.reset} Firewall recovery failed. Manual intervention required.", flush=True)
         return False
 
     def poll(self, codeword=""):
