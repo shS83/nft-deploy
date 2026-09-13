@@ -91,15 +91,15 @@ class Failsafe:
         print(f"Ruleset active: {rules.returncode}")
 
         print(f"{c.white}Systemd service enabled: {c.lime_green if enabled.returncode == 0 else c.crimson}{enabled.stdout.strip().capitalize()}")
-        print(f"{c.white}Systemd service active: {c.lime_green if active.returncode == 0 else c.crimson}{active.stdout.strip().capitalize()}")
+        print(f"{c.white}Systemd service active: {c.lime_green if active.returncode == 0 else c.peach}{active.stdout.strip().capitalize()}")
         print(f"{c.white}Nftables ruleset loaded: {c.lime_green if loaded != 0 else c.crimson}{loaded}")
-        system_status = enabled.returncode == 0 and active.returncode == 0 and loaded
+        system_status = enabled.returncode == 0 and rules.returncode == 0 and loaded
 
         print(
             f"{c.white}Comprehensive system status: {c.bright_green if system_status else c.crimson}{"Complete" if system_status else "Incomplete"}{c.reset}")
 
         # Boot enablement is reported separately from the live firewall state.
-        return active.returncode == 0 and loaded
+        return system_status
 
     def activate_failsafe(self):
         self.countdown()

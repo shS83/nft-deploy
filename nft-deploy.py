@@ -11,6 +11,9 @@ import re
 from colors import Color as c
 from datetime import datetime
 
+from nft_highlight import highlight_ruleset
+
+
 def get_default_network():
     with IPRoute() as ipr:
         routes = ipr.get_default_routes(family=2)  # AF_INET / IPv4
@@ -188,7 +191,6 @@ class Deployer:
         return zlib.decompress(basic_ruleset).decode("utf-8")
 
     def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list = []) -> str:
-        file_rules = ""
         if self.custom_file:
             try:
                 file_rules = Path(self.custom_file).read_text()
@@ -199,75 +201,77 @@ class Deployer:
         new_ruleset = []
         new_lines = []
         user_ports = []
-        modified_lines = []
         ruleset = ruleset.split("\n")
-        first_line = 0
-
-        print(f"Adding custom ruleset:\n{c.silver}")
+        line_no = 1
         checked = 0
+        print(f"Adding custom ruleset:\n{c.silver}")
+
         for i, line in enumerate(ruleset):
             if line.lstrip().startswith("pkttype ") and checked == 0 and custom_ruleset != "":
-                first_line = int(i) if isinstance(i, int) else 0
+                starting_point = int(i) if isinstance(i, int) else 1
+                line_no = int(i) if isinstance(i, int) else 1
+                new_lines.append(str(line_no + 1))
                 if not file_rules:
                     print(f"{c.lime_green}", end="")
                     print("\n    # Begin of custom ruleset")
                     new_ruleset.append("\n    # Begin of custom ruleset")
-                    first_line += 1
-                    modified_lines.append(first_line + i)
+                    line_no += 1
+                    new_lines.append(str(line_no + 1))
                     new_ruleset.append(custom_ruleset)
-                    for a, rule in enumerate(custom_ruleset.split("\n")):
-                        modified_lines.append(first_line + i + a)
                     print(custom_ruleset)
+                    new_lines.extend(str(n + line_no + 1) for n, _ in custom_ruleset.splitlines())
+                    line_no += len(custom_ruleset.splitlines())
+
                     print("    # End of custom ruleset\n")
                     new_ruleset.append("    # End of custom ruleset\n")
-                    first_line += 1
+                    line_no += 1
+                    new_lines.append(str(line_no))
 
                 if len(ports) > 0:
+                    line_no += 1
+                    new_lines.append(str(line_no + 1))
                     for port in ports:
                         print(f"{c.bright_aqua}", end="")
                         if checked == 0:
-                            print ("    # Begin of user configured ports")
                             checked = 1
+                            print ("    # Begin of user configured ports")
                             new_ruleset.append("    # Begin of user configured ports")
-                            first_line += 1
-                            user_line = f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{self.comment or "User configured new open port"}\""
-                            user_ports.append(user_line)
-                            new_ruleset.append(user_line)
-                            print(user_line)
-                            modified_lines.append(first_line + i)
-                    print("    # End of user configured ports\n")
-                    new_ruleset.append("    # End of user configured ports\n")
-                    first_line += 1
-                if file_rules.strip():
+                            line_no += 1
+                            new_lines.append(str(line_no + 1))
+                        user_line = f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{self.comment or "User configured new open port"}\""
+                        user_ports.append(user_line)
+                        new_ruleset.append(user_line)
+                        line_no += 1
+                        new_lines.append(str(line_no + 1))
+                        print(user_line)
+                    print("    # End of user configured ports")
+                    new_ruleset.append("    # End of user configured ports")
+                    line_no += 1
+                    new_lines.append(str(line_no + 1))
+                if file_rules:
+                    block = "    # Begin of custom input rules\n" + "\n".join(
+                        "    " + rule.strip() for rule in file_rules.splitlines()
+                    ) + "\n    # End of custom input rules"
+
+                    area = [str(a + 1) for a in range(line_no + 1, line_no + len(file_rules.splitlines()) + 1)]
+                    new_lines.extend(area)
+                    new_lines.append(str(line_no + len(file_rules.splitlines()) + 2))
+                    line_no += len(block.splitlines())
+                    new_ruleset.extend(block.splitlines())
                     print(f"{c.lime_green}", end="")
-                    block = "    # Begin of file input rules\n" + "\n".join(
-                        "    " + rule for rule in file_rules.splitlines()
-                    ) + "\n    # End of file input rules"
-                    new_ruleset.append(block)
-                    virgin = 1
-                    for _ in new_ruleset:
-                        if virgin:
-                            first_line += 1
-                            virgin = 0
-                        modified_lines.append(first_line + i)
-                        first_line += 1
                     print(block)
 
             print(f"{c.silver}", end="")
             print(line)
             new_ruleset.append(line)
 
-        custom_line_count = len(custom_ruleset.splitlines()) + len(user_ports)
-        first_line += 1
-
-        new_lines.extend(
-            range(first_line, first_line + custom_line_count)
-        )
-        print(f"{c.dark_gray}DEBUG: {c.peach}{modified_lines}")
         print(f"{c.reset}", end="")
 
-        print(f"{c.white}Added no. of custom rule lines: {c.bright_aqua}{len(new_lines)}{c.white}, lines: {c.golden_orange}{", ".join(str(x) for x in new_lines)}{c.reset}")
+        print(f"{c.white}Added no. of custom rule lines: {c.bright_aqua}{line_no - starting_point}{c.reset} - Added lines: {c.lime_yellow}{", ".join(new_lines)}")
         print(f"{c.deep_purple}Aces!{c.reset}")
+        print(f"{c.purple}Final configuration:{c.reset}\n")
+        for i, line in enumerate(new_ruleset):
+            print(f"{c.bright_green}{i + 1}{c.reset}\t{highlight_ruleset(line)}{c.reset}")
         return "\n".join(new_ruleset)
 
     def check_args(self):
@@ -454,9 +458,13 @@ class Deployer:
             else:
                 self.ruleset = self.merge_ruleset(self.ruleset, file_contents)
         else:
-            self.ruleset = self.merge_ruleset(self.ruleset, self.get_promethean_rules())
+            self.ruleset = self.merge_ruleset(
+                self.ruleset,
+                self.get_promethean_rules(),
+                ports=self.ports,
+            )
 
-        print(f"\nWould save it in: {c.amethyst}{self.config_path}{c.reset}\n")
+        print(f"\nWould save it in: {c.amethyst}{self.config_path}{c.reset}")
         if not deploy:
             with open(self.dry_run_config_file, "w") as f:
                 f.write(self.ruleset)
@@ -468,6 +476,7 @@ class Deployer:
         return self.ruleset
 
     def dry_run(self) -> int:
+        failsafe = self.start_failsafe()
         if not self.backup_first():
             print(
                 f"{c.bright_red}"
@@ -489,7 +498,7 @@ class Deployer:
 
     @staticmethod
     def help():
-        print(f"{c.dark_purple}NFT Deployer {c.white}-- {c.deep_purple}failsafe guard for updating nftables configs {c.reset}")
+        print(f"{c.dark_purple}NFT Deployer {c.white}-- {c.bright_red}failsafe guard for updating nftables configs {c.reset}")
         print()
         print(f"Usage: {c.light_gold}nft-deploy.py {c.bright_green}[options]{c.reset}")
         print("Options:")

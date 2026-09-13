@@ -1,0 +1,2 @@
+#!/bin/bash
+sudo .venv/bin/python3 nft-deploy.py $@
