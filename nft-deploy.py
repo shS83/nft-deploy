@@ -71,7 +71,9 @@ class Deployer:
         self.ports: list = []
         self.default_ruleset: str = ""
         self.custom_file: str = ""
-        self.dry_run_config: str | Path = "/tmp/nft-deploy/nft-dry-run-rules.conf"
+        self.dry_run_config: str = ""
+        self.dry_run_config_file: str | Path = "/tmp/nft-deploy/nft-dry-run-rules.conf"
+        self.temp_config: str | Path = "/tmp/nft-deploy/nft-deploy-rules.conf"
         self.custom_ruleset: str = ""
         self.ruleset: str = ""
         self.comment: str | None = None
@@ -148,7 +150,7 @@ class Deployer:
                 backup_file,
             )
 
-            # Failsafe tarvitsee uusimman backupin polun.
+            # Failsafe needs the newest backup path
             self.backup_file = str(backup_file)
 
             self.clean_old_backups(
@@ -186,9 +188,6 @@ class Deployer:
         return zlib.decompress(basic_ruleset).decode("utf-8")
 
     def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list = []) -> str:
-        print(f"{c.aquamarine}{ports}{c.reset}")
-        # if custom_ruleset == "":
-        #    custom_ruleset = self.get_promethean_rules()
         file_rules = ""
         if self.custom_file:
             try:
@@ -200,6 +199,7 @@ class Deployer:
         new_ruleset = []
         new_lines = []
         user_ports = []
+        modified_lines = []
         ruleset = ruleset.split("\n")
         first_line = 0
 
@@ -212,44 +212,58 @@ class Deployer:
                     print(f"{c.lime_green}", end="")
                     print("\n    # Begin of custom ruleset")
                     new_ruleset.append("\n    # Begin of custom ruleset")
+                    first_line += 1
+                    modified_lines.append(first_line + i)
                     new_ruleset.append(custom_ruleset)
+                    for a, rule in enumerate(custom_ruleset.split("\n")):
+                        modified_lines.append(first_line + i + a)
                     print(custom_ruleset)
-                if len(ports) > 0:
-                    # print(f"DEBUG (ports): {self.ports}")
                     print("    # End of custom ruleset\n")
                     new_ruleset.append("    # End of custom ruleset\n")
+                    first_line += 1
+
+                if len(ports) > 0:
                     for port in ports:
                         print(f"{c.bright_aqua}", end="")
                         if checked == 0:
                             print ("    # Begin of user configured ports")
                             checked = 1
-                        new_ruleset.append("    # Begin of user configured ports")
-                        user_line = f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{self.comment or "User configured new open port"}\""
-                        user_ports.append(user_line)
-                        new_ruleset.append(user_line)
-                        print(user_line)
+                            new_ruleset.append("    # Begin of user configured ports")
+                            first_line += 1
+                            user_line = f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{self.comment or "User configured new open port"}\""
+                            user_ports.append(user_line)
+                            new_ruleset.append(user_line)
+                            print(user_line)
+                            modified_lines.append(first_line + i)
                     print("    # End of user configured ports\n")
                     new_ruleset.append("    # End of user configured ports\n")
-
+                    first_line += 1
                 if file_rules.strip():
                     print(f"{c.lime_green}", end="")
                     block = "    # Begin of file input rules\n" + "\n".join(
                         "    " + rule for rule in file_rules.splitlines()
                     ) + "\n    # End of file input rules"
                     new_ruleset.append(block)
+                    virgin = 1
+                    for _ in new_ruleset:
+                        if virgin:
+                            first_line += 1
+                            virgin = 0
+                        modified_lines.append(first_line + i)
+                        first_line += 1
                     print(block)
 
             print(f"{c.silver}", end="")
             print(line)
             new_ruleset.append(line)
 
-        custom_line_count = len(custom_ruleset.splitlines())
+        custom_line_count = len(custom_ruleset.splitlines()) + len(user_ports)
         first_line += 1
 
         new_lines.extend(
             range(first_line, first_line + custom_line_count)
         )
-
+        print(f"{c.dark_gray}DEBUG: {c.peach}{modified_lines}")
         print(f"{c.reset}", end="")
 
         print(f"{c.white}Added no. of custom rule lines: {c.bright_aqua}{len(new_lines)}{c.white}, lines: {c.golden_orange}{", ".join(str(x) for x in new_lines)}{c.reset}")
@@ -332,10 +346,6 @@ class Deployer:
                 return self.optimize()
             case "help" | None:
                 return self.help()
-            case _:
-                print(f"{c.crimson}This should have never been reached.{c.reset}")
-                return 1
-        return 0
 
     def optimize(self):
         if not self.backup_first():
@@ -401,10 +411,12 @@ class Deployer:
             return 1
         if self.check_env() != 0 or not self.backup_first():
             return 1
-        # if not self.ruleset:
-           # self.ruleset = self.merge_ruleset(self.get_default_rules(), self.get_promethean_rules())
-        candidate = Path(self.backup_file + ".candidate")
+        if not self.ruleset:
+            self.ruleset = self.compile_config(deploy=True)
+
+        candidate = Path(f"{self.backup_file}.candidate")
         candidate.write_text(self.ruleset)
+
         try:
             if self.test_rules(str(candidate)) != 0:
                 return 1
@@ -415,10 +427,7 @@ class Deployer:
             deployment_ok = False
             try:
                 shutil.copyfile(candidate, self.config_path)
-                result = subprocess.run(
-                    [self.nft, "-f", self.config_path],
-                    capture_output=True, text=True, timeout=30,
-                )
+                result = subprocess.run([self.nft, "-f", self.config_path], capture_output=True, text=True, timeout=30)
                 deployment_ok = result.returncode == 0
                 if not deployment_ok:
                     print(result.stderr or result.stdout or "Deployment failed.")
@@ -435,6 +444,29 @@ class Deployer:
         finally:
             candidate.unlink(missing_ok=True)
 
+    def compile_config(self, deploy=False) -> str:
+        self.ruleset = self.get_default_rules()
+        if self.custom_file:
+            with open(self.custom_file, 'r') as f:
+                file_contents = f.read()
+            if self.ports:
+                self.ruleset = self.merge_ruleset(self.ruleset, file_contents, ports=self.ports)
+            else:
+                self.ruleset = self.merge_ruleset(self.ruleset, file_contents)
+        else:
+            self.ruleset = self.merge_ruleset(self.ruleset, self.get_promethean_rules())
+
+        print(f"\nWould save it in: {c.amethyst}{self.config_path}{c.reset}\n")
+        if not deploy:
+            with open(self.dry_run_config_file, "w") as f:
+                f.write(self.ruleset)
+            print(f"Wrote config file to: {c.bright_pink}{self.dry_run_config_file}{c.reset}")
+        else:
+            with open(self.temp_config, "w") as f:
+                f.write(self.ruleset)
+            print(f"Wrote config file to: {c.bright_pink}{self.temp_config}{c.reset}")
+        return self.ruleset
+
     def dry_run(self) -> int:
         if not self.backup_first():
             print(
@@ -448,22 +480,8 @@ class Deployer:
         else:
             print(f"{c.crimson}Backup failed{c.reset}. Please check your permissions.")
             return 1
-        self.ruleset = self.get_default_rules()
-        if self.custom_file:
-            with open(self.custom_file, 'r') as f:
-                file_contents = f.read()
-            if self.ports:
-                self.ruleset = self.merge_ruleset(self.ruleset, file_contents, ports=self.ports)
-            else:
-                self.ruleset = self.merge_ruleset(self.ruleset, file_contents)
-        else:
-            self.ruleset = self.merge_ruleset(self.ruleset, self.get_promethean_rules())
-
-        print(f"\nWould save it in: {c.amethyst}{self.config_path}{c.reset}\n")
-        with open(self.dry_run_config, "w") as f:
-            f.write(self.ruleset)
-        print(f"Wrote config file to: {c.bright_pink}{self.dry_run_config}{c.reset}")
-        passable = self.test_rules(self.dry_run_config)
+        self.dry_run_config = self.compile_config(deploy=False)
+        passable = self.test_rules(str(self.dry_run_config_file))
         if passable != 0:
             print(f"{c.crimson}This was tested and something is really broken, sorry mate.")
             return 1
@@ -478,7 +496,7 @@ class Deployer:
         print()
         print(f"  {c.golden_orange}--dry-run: {c.light_gold}Do not actually deploy anything{c.reset}")
         print(f"  {c.golden_orange}--help: {c.light_gold}Show this help message{c.reset}")
-        print(f"  {c.golden_orange}--deploy: {c.light_gold}Deploy the default ruleset{c.reset}")
+        print(f"  {c.golden_orange}--deploy: {c.light_gold}Deploy the rulesets{c.reset}")
         print(f"  {c.golden_orange}--config: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
         print(f"  {c.golden_orange}--file: {c.light_gold}Append input-chain rules from a file above pkttype (no table/chain wrapper){c.reset}")
         print(f"  {c.golden_orange}--port: {c.light_gold}Allow a specific port in the config from your personal local subnet{c.reset}")
