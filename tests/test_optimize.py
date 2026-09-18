@@ -18,6 +18,9 @@ class OptimizeTests(unittest.TestCase):
     def deployer(self, config):
         deployer = m.Deployer.__new__(m.Deployer)
         deployer.config_path = str(config)
+        deployer.tmp_path = str(config.parent / 'runtime')
+        deployer.lock_fd = None
+        deployer.lock_transferred = False
         deployer.nft = '/usr/sbin/nft'
         deployer.optimized = None
         deployer.backup_first = mock.Mock(return_value=True)

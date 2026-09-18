@@ -6,16 +6,18 @@ import shutil
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 from colors import Color as c
 from nft_highlight import highlight_ruleset
 
 class Failsafe:
-    def __init__(self, failsafe_timer, backupfile, config_file="/etc/nftables.conf", simulate_failure=False):
+    def __init__(self, failsafe_timer, backupfile, config_file="/etc/nftables.conf", simulate_failure=False, lock_fd=None):
         self.simulate_failure = simulate_failure
         self.timer = failsafe_timer
         self.backup_file = backupfile
         self.config_file = config_file
+        self.lock_fd = lock_fd
         self.nft = shutil.which("nft")
         self.errors = None
         if not self.nft and not simulate_failure:
@@ -154,7 +156,7 @@ class Failsafe:
         time.sleep(1)
         print(f"{c.white}Restoring rollback configuration to: {c.coral}{self.config_file}{c.reset}", flush=True)
         try:
-            shutil.copyfile(self.backup_file, self.config_file)
+            self.atomic_restore_config()
         except OSError as error:
             print(f"{c.crimson}Could not restore rollback configuration: {error}{c.reset}", flush=True)
             return False
@@ -174,6 +176,33 @@ class Failsafe:
 
         print(f"{c.crimson}ERROR:{c.reset} Firewall recovery failed. Manual intervention required.", flush=True)
         return False
+
+    def atomic_restore_config(self) -> None:
+        destination = Path(self.config_file)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{destination.name}.rollback-",
+                dir=destination.parent,
+                delete=False,
+            ) as temporary:
+                temporary_name = temporary.name
+
+            shutil.copy2(self.backup_file, temporary_name)
+            with open(temporary_name, "rb") as temporary:
+                os.fsync(temporary.fileno())
+            os.replace(temporary_name, destination)
+            temporary_name = None
+
+            directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if temporary_name is not None:
+                Path(temporary_name).unlink(missing_ok=True)
 
     def confirm_rollback(self):
         # Only the foreground command may read input; the background guard
@@ -212,6 +241,7 @@ def main():
     parser.add_argument("--wait-for-parent", action="store_true")
     parser.add_argument("--rollback", action="store_true", help="Confirm backup restoration in the foreground")
     parser.add_argument("--simulate-failure", action="store_true", help="Simulate a failed check without changing the firewall")
+    parser.add_argument("--lock-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.rollback and args.simulate_failure:
@@ -226,7 +256,13 @@ def main():
     if os.geteuid() != 0 and not args.simulate_failure:
         parser.error("Failsafe requires root privileges; run the deployer with sudo")
     try:
-        failsafe = Failsafe(args.timer, backup_file, args.config, simulate_failure=args.simulate_failure)
+        failsafe = Failsafe(
+            args.timer,
+            backup_file,
+            args.config,
+            simulate_failure=args.simulate_failure,
+            lock_fd=args.lock_fd,
+        )
 
         if args.rollback:
             return 0 if failsafe.confirm_rollback() else 1
