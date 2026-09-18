@@ -18,6 +18,7 @@ class Failsafe:
         self.backup_file = backupfile
         self.config_file = config_file
         self.nft = shutil.which("nft")
+        self.errors = None
         if not self.nft and not simulate_failure:
             raise RuntimeError("nft executable not found")
 
@@ -158,6 +159,8 @@ class Failsafe:
         return False
 
     def poll(self, codeword=""):
+        if codeword.casefold() == "status":
+            self.check_main_status()
         if codeword.casefold() == "foo":
             return "bar"
         elif codeword.casefold() == "ken sent me":

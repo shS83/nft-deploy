@@ -1,15 +1,22 @@
 import os
+import difflib
 import subprocess
 import sys
 import zlib
 from ipaddress import IPv4Interface
 from pyroute2 import IPRoute
 import shutil
+import textwrap
 import time
 from pathlib import Path
 import re
 from colors import Color as c
 from datetime import datetime
+from nft_failsafe import Failsafe
+from nft_highlight import highlight_ruleset
+from enum import StrEnum
+
+STATUS = ""
 
 def get_default_network():
     with IPRoute() as ipr:
@@ -61,22 +68,33 @@ def get_default_network():
         )
 
 class Deployer:
+    class State(StrEnum):
+        NONE = "No changes."
+        INPUT = "Input chain modified."
+        FORWARD = "Forward chain modified."
+        OUTPUT = "Output chain modified."
+
+    STATE = [State.NONE]
+    global STATUS
+
     def __init__(self, args: list):
         self.pwd: str = str(Path(__file__).resolve().parent)
         self.args: list = args
-        self.kwargs: list = []
+        self.STATE = [self.State.NONE]
         self.is_dry_run: bool = False
-        self.failsafe: str | None = None
+        self.failsafe: object = None
         self.config_path: str = "/etc/nftables.conf"
         self.ports: list = []
         self.default_ruleset: str = ""
-        self.custom_file: str = ""
+        self.custom_input_file: str = ""
+        self.custom_forward_file: str = ""
+        self.custom_output_file: str = ""
         self.dry_run_config: str | Path = "/tmp/nft-deploy/nft-dry-run-rules.conf"
         self.custom_ruleset: str = ""
         self.ruleset: str = ""
         self.comment: str | None = None
         self.compressed_config: bytes = b""
-        self.failsafe_timer: float = 60.0
+        self.failsafe_timer: float = 15.0
         self.user_home: str | None = os.getenv("HOME")
         self.backup_file: str = "/tmp/nft-deploy/nftables.conf.backup"
         self.ports: list = []
@@ -186,74 +204,139 @@ class Deployer:
         basic_ruleset = b'x\xda\xbd\x8e\xddj\xc3 \x1cG\xef\xf7\x14?\xf2\x00m>\x0c\x89\x97i\xbaAG;\xba\x04\xbak\xa7\xae\x0b5\x1a\xd4\x92=\xfe2z\xb1\x91\x12\xe86\x88z#\x9e\xf3?\x02@\xd3\xc11!,\xa2p1\x1c\x12/\xc2e\x9c\xc1\xf3\x0e\xa23\xd6#J2p\x0f\xe7\x99\x97\xd0\xb2\x07\xe3\\v\x1e\xdc\xb4\xad\xd4\x1eAq\xb9\xd7\xbb\xd5\xb2\xdc<\xd4x\xb3\xa6\x852\x9c\xa9\x01\xf7\xbd\xb1\xa7\xe0\x0e\xb7\x95\xf2\xd9Jt\xa6\x12!\xe9L\xa5<\xcc\xe3\x9bR\xc5\xf6P\xfd=C)\x99)\x93\xcc\x93!\xff\xcf|\xcfs\xee\xfdz\x82R\xa6\xffz\x11c:\xa54\x9c\xc0\x1f\xa5\x7f\xb5\xac\xd1\x0e\x9b\xf5=\xaa}y\xe5\x86\xc3\x9a\x90K#\xe4\xc7X\xa0Y\x9aM\xf0/\xcd\xa1z\xba\xf0g\xf1;\xfe\xc7\x87H\x12O\xf0{\xe3\xfc\xd1\xca\xfay;\x96\xa2t\xd8\x13V\xb1\xc2\xda\xf4Z\x19&\xb0c\x9a\x1d\xa5\x85j\xf4\t\x9cu\xfele\x80O_F~\xdd'
         return zlib.decompress(basic_ruleset).decode("utf-8")
 
-    def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list = []) -> str:
+    @staticmethod
+    def _brace_count(line: str) -> int:
+        """Count nft block braces, ignoring comments and quoted strings."""
+        count = 0
+        quote = None
+        escaped = False
+        for character in line:
+            if escaped:
+                escaped = False
+                continue
+            if quote and character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            elif quote:
+                continue
+            elif character in ('"', "'"):
+                quote = character
+            elif character == "#":
+                break
+            elif character == "{":
+                count += 1
+            elif character == "}":
+                count -= 1
+        return count
+
+    @classmethod
+    def _find_block(cls, lines: list[str], declaration: re.Pattern) -> tuple[int, int] | None:
+        for start, line in enumerate(lines):
+            if not declaration.match(line):
+                continue
+            depth = 0
+            opened = False
+            for end in range(start, len(lines)):
+                change = cls._brace_count(lines[end])
+                opened = opened or change > 0
+                depth += change
+                if opened and depth == 0:
+                    return start, end
+        return None
+
+    @staticmethod
+    def _indent_block(content: str, indent: str) -> list[str]:
+        content = textwrap.dedent(content.strip("\n"))
+        return [indent + line if line else "" for line in content.splitlines()]
+
+    def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list | None = None) -> str:
         if custom_ruleset == "":
             custom_ruleset = self.get_promethean_rules()
-        file_rules = ""
-        if self.custom_file:
+
+        chain_content = {"input": [], "forward": [], "output": []}
+        if custom_ruleset.strip() and self.State.INPUT in self.STATE:
+            chain_content["input"].append(("custom ruleset", custom_ruleset))
+
+            selected_ports = self.ports if ports is None else ports
+            if selected_ports:
+                port_rules = "\n".join(
+                    f'ip saddr {self.network} tcp dport {port} ct state new accept '
+                    f'comment "{self.comment or "User configured new open port"}"'
+                    for port in selected_ports
+                )
+                chain_content["input"].append(("user configured ports", port_rules))
+
+        for chain, attribute in (
+            ("input", "custom_input_file"),
+            ("forward", "custom_forward_file"),
+            ("output", "custom_output_file"),
+        ):
+            filename = getattr(self, attribute, "")
+            if not filename:
+                continue
             try:
-                file_rules = Path(self.custom_file).read_text()
+                file_rules = Path(filename).read_text()
             except (OSError, UnicodeError) as error:
-                raise SystemExit(f"Cannot read custom rules {self.custom_file}: {error}") from error
-        new_ruleset = []
-        new_lines = []
-        user_ports = []
-        ruleset = ruleset.split("\n")
-        first_line = 0
+                raise SystemExit(f"Cannot read custom rules {filename}: {error}") from error
+            if file_rules.strip():
+                chain_content[chain].append((f"file {chain} rules", file_rules))
 
-        print(f"Adding custom ruleset:\n{c.silver}")
-        checked = 0
-        for i, line in enumerate(ruleset):
-            if line.lstrip().startswith("pkttype ") and checked == 0 and custom_ruleset != "":
-                first_line = int(i) if isinstance(i, int) else 0
-                print(f"{c.lime_green}", end="")
-                if checked == 0:
-                    print("\n    # Begin of custom ruleset")
-                    new_ruleset.append("\n    # Begin of custom ruleset")
-                    checked = 1
-                new_ruleset.append(custom_ruleset)
-                print(custom_ruleset)
-                if len(self.ports) > 0:
-                    # print(f"DEBUG (ports): {self.ports}")
-                    print("    # End of custom ruleset\n")
-                    new_ruleset.append("    # End of custom ruleset\n")
-                    for port in self.ports:
-                        if checked == 1:
-                            print(f"{c.bright_aqua}", end="")
-                            print ("    # Begin of user configured ports")
-                            new_ruleset.append("    # Begin of user configured ports")
-                            checked = 2
-                        user_line = f"    ip saddr {self.network} tcp dport {port} ct state new accept comment \"{self.comment or "User configured new open port"}\""
-                        user_ports.append(user_line)
-                        new_ruleset.append(user_line)
-                        print(user_line)
-                    print("    # End of user configured ports\n")
-                    new_ruleset.append("    # End of user configured ports\n")
+        original_lines = ruleset.splitlines()
+        lines = original_lines.copy()
+        for chain, blocks in chain_content.items():
+            if not blocks:
+                continue
 
-                if file_rules.strip():
-                    print(f"{c.lime_green}", end="")
-                    block = "    # Begin of file input rules\n" + "\n".join(
-                        "    " + rule for rule in file_rules.splitlines()
-                    ) + "\n    # End of file input rules"
-                    new_ruleset.append(block)
-                    print(block)
+            declaration = re.compile(rf"^\s*chain\s+(?:{chain}|[\"']{chain}[\"'])\s*\{{")
+            span = self._find_block(lines, declaration)
+            if span is None:
+                table = self._find_block(
+                    lines, re.compile(r"^\s*table\s+inet\s+filter\s*\{")
+                )
+                policy = "accept" if chain == "output" else "drop"
+                new_chain = [
+                    f"  chain {chain} {{",
+                    f"    type filter hook {chain} priority filter",
+                    f"    policy {policy}",
+                    "  }",
+                ]
+                if table is None:
+                    if lines and lines[-1].strip():
+                        lines.append("")
+                    lines.extend(["table inet filter {", *new_chain, "}"])
+                else:
+                    lines[table[1]:table[1]] = new_chain
+                span = self._find_block(lines, declaration)
 
-            print(f"{c.silver}", end="")
-            print(line)
-            new_ruleset.append(line)
+            _, closing_line = span
+            closing_indent = lines[closing_line][:-len(lines[closing_line].lstrip())]
+            rule_indent = closing_indent + "  "
+            additions = []
+            if closing_line and lines[closing_line - 1].strip():
+                additions.append("")
+            for label, content in blocks:
+                additions.append(f"{rule_indent}# Begin of {label}")
+                additions.extend(self._indent_block(content, rule_indent))
+                additions.append(f"{rule_indent}# End of {label}")
+            lines[closing_line:closing_line] = additions
 
-        custom_line_count = len(custom_ruleset.splitlines())
-        first_line += 1
+        result = "\n".join(lines) + ("\n" if ruleset.endswith("\n") else "")
+        changed_lines = []
+        matcher = difflib.SequenceMatcher(None, original_lines, lines, autojunk=False)
+        for operation, _, _, final_start, final_end in matcher.get_opcodes():
+            if operation in ("replace", "insert"):
+                changed_lines.extend(range(final_start + 1, final_end + 1))
 
-        new_lines.extend(
-            range(first_line, first_line + custom_line_count)
+        print(f"Adding custom ruleset:\n{c.green}{result}{c.reset}", end="")
+        print(
+            f"{c.white}Number of changed lines: "
+            f"{c.bright_green}{len(changed_lines)}{c.white}, lines: "
+            f"{c.golden_orange}{', '.join(str(line) for line in changed_lines)}"
+            f"{c.reset}"
         )
-
-        print(f"{c.reset}", end="")
-
-        print(f"{c.white}Added no. of custom rule lines: {c.bright_aqua}{len(new_lines)}{c.white}, lines: {c.golden_orange}{", ".join(str(x) for x in new_lines)}{c.reset}")
         print(f"{c.deep_purple}Aces!{c.reset}")
-        return "\n".join(new_ruleset)
+        return result
 
     def check_args(self):
         action = None
@@ -289,11 +372,31 @@ class Deployer:
 
                     self.config_path = self.args[i + 1]
 
-                case "--file":
+                case "--input-file":
                     if i + 1 >= len(self.args):
-                        raise SystemExit(f"{c.crimson}--file needs a filename{c.reset}")
+                        raise SystemExit(f"{c.crimson}--input-file needs a filename{c.reset}")
 
-                    self.custom_file = self.args[i + 1]
+                    if self.State.NONE in self.STATE:
+                        self.STATE.remove(self.State.NONE)
+                    self.STATE.append(self.State.INPUT)
+                    self.custom_input_file = self.args[i + 1]
+
+                case "--forward-file":
+                    if i + 1 >= len(self.args):
+                        raise SystemExit(f"{c.crimson}--forward-file needs a filename{c.reset}")
+                    if self.State.NONE in self.STATE:
+                        self.STATE.remove(self.State.NONE)
+                    self.STATE.append(self.State.FORWARD)
+                    self.custom_forward_file = self.args[i + 1]
+
+                case "--output-file":
+                    if i + 1 >= len(self.args):
+                        raise SystemExit(f"{c.crimson}--output-file needs a filename{c.reset}")
+
+                    if self.State.NONE in self.STATE:
+                        self.STATE.remove(self.State.NONE)
+                    self.STATE.append(self.State.OUTPUT)
+                    self.custom_output_file = self.args[i + 1]
 
                 case "--timer":
                     if i + 1 >= len(self.args):
@@ -316,6 +419,9 @@ class Deployer:
                 case "--help":
                     action = "help"
 
+                case "--status":
+                    action = "status"
+
                 case _:
                     raise SystemExit(f"Invalid argument: {c.crimson}{arg}")
 
@@ -328,6 +434,10 @@ class Deployer:
                 return self.optimize()
             case "help" | None:
                 return self.help()
+            case "status":
+                self.failsafe = Failsafe(self.failsafe_timer, self.backup_file)
+                self.failsafe.check_main_status()
+                return 0
             case _:
                 print(f"{c.crimson}This should have never been reached.{c.reset}")
                 return 1
@@ -359,9 +469,10 @@ class Deployer:
         )
 
         if program.stdout:
-            print(f"{c.golden_orange}Optimized rules:{c.reset}")
-            print(program.stdout, end="")
             self.optimized = program.stdout
+            print(highlight_ruleset(self.optimized), end="")
+            if not self.optimized.endswith("\n"):
+                print()
 
         if program.stderr:
             print(f"{c.light_gold}Optimization report:{c.reset}")
@@ -373,6 +484,28 @@ class Deployer:
                 f"{c.bright_red}{program.returncode}{c.reset}"
             )
             return 1
+
+        if not self.optimized:
+            print(f"{c.crimson}Optimization produced no ruleset.{c.reset}")
+            return 1
+
+        optimized_preview = self.optimized.replace("\n", "\n\t").rstrip()
+        answer = input(
+            f"{c.bright_blue}Optimized changes would be these:\n"
+            f"\t{optimized_preview}\n"
+            f"Do you want to continue Yes/No? {c.reset}"
+        ).strip().lower()
+        if answer not in ("yes", "y"):
+            print(f"{c.white}Optimization canceled. No changes were made.{c.reset}")
+            return 0
+
+        try:
+            Path(self.config_path).write_text(self.optimized)
+        except (OSError, UnicodeError) as error:
+            print(f"{c.crimson}Could not save optimized ruleset: {error}{c.reset}")
+            return 1
+
+        print(f"{c.bright_green}Optimized ruleset saved in {self.config_path}.{c.reset}")
 
         return 0
 
@@ -388,7 +521,20 @@ class Deployer:
             print("Excellent! Clean config file.")
         return result.returncode
 
-    def deploy(self):
+    def print_change_summary(self, proposed: bool = False) -> None:
+        changed_states = [state for state in self.STATE if state != self.State.NONE]
+        if not changed_states:
+            changed_states = [self.State.NONE]
+
+        # Preserve command-line order but do not print a chain more than once.
+        state_names = ", ".join(dict.fromkeys(state.name for state in changed_states))
+        action = "proposed to" if proposed else "made to"
+        print(
+            f"{c.white}Changes were {action} "
+            f"{c.bright_green}{state_names}{c.reset}."
+        )
+
+    def deploy(self) -> int:
         if os.geteuid() != 0:
             print("Deployment requires root. Run this script with sudo.")
             return 1
@@ -426,6 +572,7 @@ class Deployer:
                 guard.stdin.close()
             if deployment_ok:
                 print(f"Configuration saved in {self.config_path}. Failsafe verification continues in the background.", flush=True)
+                self.print_change_summary()
                 return 0
             return 1
         finally:
@@ -453,9 +600,12 @@ class Deployer:
         print(f"Wrote config file to: {c.bright_pink}{self.dry_run_config}{c.reset}")
         passable = self.test_rules(self.dry_run_config)
         if passable != 0:
-            print(f"{c.crimson}This was tested and something is really broken, sorry mate.")
+            print(f"{c.crimson}This was tested and something is really broken, sorry mate.{c.reset}")
             return 1
-        return 2
+        print(f"{c.yellow}Dry run finished successfully.{c.reset}")
+        self.print_change_summary(proposed=True)
+        print(f"{c.peach_puff}No changes were made to the config file.{c.reset}")
+        return 0
 
     @staticmethod
     def help():
@@ -468,15 +618,19 @@ class Deployer:
         print(f"  {c.golden_orange}--help: {c.light_gold}Show this help message{c.reset}")
         print(f"  {c.golden_orange}--deploy: {c.light_gold}Deploy the default ruleset{c.reset}")
         print(f"  {c.golden_orange}--config: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
-        print(f"  {c.golden_orange}--file: {c.light_gold}Append input-chain rules from a file above pkttype (no table/chain wrapper){c.reset}")
-        print(f"  {c.golden_orange}--port: {c.light_gold}Allow a specific port in the config from your personal local subnet{c.reset}")
+        print(f"  {c.golden_orange}--input-file: {c.light_gold}Append input-chain rules from a file as last rules{c.reset}")
+        print(f"  {c.golden_orange}--forward-file: {c.light_gold}Append forward-chain rules from a file as last rules{c.reset}")
+        print(f"  {c.golden_orange}--output-file: {c.light_gold}Append output-chain rules from a file as last rules{c.reset}")
+        print(f"  {c.golden_orange}--port: {c.light_gold}Allow a specific port in the config input chain from your personal local subnet{c.reset}")
         print(f"  {c.golden_orange}--comment: {c.light_gold}Comment to be added into the config file for your ports{c.reset}")
-        print(f"  {c.golden_orange}--timer: {c.light_gold}failsafe timer in seconds (default: 60.0 seconds){c.reset}")
+        print(f"  {c.golden_orange}--timer: {c.light_gold}failsafe timer in seconds (default: 15.0 seconds){c.reset}")
+        print(f"  {c.golden_orange}--status: {c.light_gold}Show system status{c.reset}")
+
         print()
         quit()
 
     def check_env(self):
-        if not os.path.exists(f"{self.pwd}/nft-failsafe.py"):
+        if not os.path.exists(f"{self.pwd}/nft_failsafe.py"):
             return 1
         return 0
 
@@ -500,7 +654,7 @@ class Deployer:
                         "Deployment aborted before changing the firewall."
                     ) from error
             program = subprocess.Popen(
-                [sys.executable, "-u", str(Path(self.pwd) / "nft-failsafe.py"),
+                [sys.executable, "-u", str(Path(self.pwd) / "nft_failsafe.py"),
                  str(int(self.failsafe_timer)), self.backup_file,
                  "--config", self.config_path, "--wait-for-parent"],
                 stdin=subprocess.PIPE,
@@ -518,7 +672,4 @@ class Deployer:
 if __name__ == "__main__":
     process = Deployer(sys.argv)
     result = process.check_args()
-    if result == 2:
-        print("Dry run finished successfully. No changes were made to the config file.")
-        result = 0
     sys.exit(result)

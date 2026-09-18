@@ -52,7 +52,7 @@ print('stderr-connected', file=sys.stderr, flush=True)
                 kwargs['stdout'] = sudo_slave
             if kwargs.get('stderr') is None:
                 kwargs['stderr'] = sudo_slave
-            return real_popen([sys.executable, '-u', '-c', child_code, str(ROOT / 'nft-failsafe.py')], **kwargs)
+            return real_popen([sys.executable, '-u', '-c', child_code, str(ROOT / 'nft_failsafe.py')], **kwargs)
 
         try:
             with patch.dict(os.environ, {'SUDO_TTY': os.ttyname(slave), 'TERM': 'xterm'}), patch.object(module.subprocess, 'Popen', side_effect=spawn):
