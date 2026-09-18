@@ -82,13 +82,14 @@ class Deployer:
         self.args: list = args
         self.STATE = [self.State.NONE]
         self.is_dry_run: bool = False
+        self.use_current_rules: bool = False
         self.failsafe: object = None
         self.config_path: str = "/etc/nftables.conf"
         self.ports: list = []
         self.default_ruleset: str = ""
-        self.custom_input_file: str = ""
-        self.custom_forward_file: str = ""
-        self.custom_output_file: str = ""
+        self.custom_input_files: list[str] = []
+        self.custom_forward_files: list[str] = []
+        self.custom_output_files: list[str] = []
         self.dry_run_config: str | Path = "/tmp/nft-deploy/nft-dry-run-rules.conf"
         self.custom_ruleset: str = ""
         self.ruleset: str = ""
@@ -199,6 +200,16 @@ class Deployer:
         decompressed = zlib.decompress(self.compressed_config).decode("utf-8")
         return str(decompressed)
 
+    def get_base_rules(self) -> str:
+        if not self.use_current_rules:
+            return self.get_default_rules()
+        try:
+            return Path(self.config_path).read_text()
+        except (OSError, UnicodeError) as error:
+            raise SystemExit(
+                f"Cannot read current ruleset {self.config_path}: {error}"
+            ) from error
+
     @staticmethod
     def get_promethean_rules():
         basic_ruleset = b'x\xda\xbd\x8e\xddj\xc3 \x1cG\xef\xf7\x14?\xf2\x00m>\x0c\x89\x97i\xbaAG;\xba\x04\xbak\xa7\xae\x0b5\x1a\xd4\x92=\xfe2z\xb1\x91\x12\xe86\x88z#\x9e\xf3?\x02@\xd3\xc11!,\xa2p1\x1c\x12/\xc2e\x9c\xc1\xf3\x0e\xa23\xd6#J2p\x0f\xe7\x99\x97\xd0\xb2\x07\xe3\\v\x1e\xdc\xb4\xad\xd4\x1eAq\xb9\xd7\xbb\xd5\xb2\xdc<\xd4x\xb3\xa6\x852\x9c\xa9\x01\xf7\xbd\xb1\xa7\xe0\x0e\xb7\x95\xf2\xd9Jt\xa6\x12!\xe9L\xa5<\xcc\xe3\x9bR\xc5\xf6P\xfd=C)\x99)\x93\xcc\x93!\xff\xcf|\xcfs\xee\xfdz\x82R\xa6\xffz\x11c:\xa54\x9c\xc0\x1f\xa5\x7f\xb5\xac\xd1\x0e\x9b\xf5=\xaa}y\xe5\x86\xc3\x9a\x90K#\xe4\xc7X\xa0Y\x9aM\xf0/\xcd\xa1z\xba\xf0g\xf1;\xfe\xc7\x87H\x12O\xf0{\xe3\xfc\xd1\xca\xfay;\x96\xa2t\xd8\x13V\xb1\xc2\xda\xf4Z\x19&\xb0c\x9a\x1d\xa5\x85j\xf4\t\x9cu\xfele\x80O_F~\xdd'
@@ -247,40 +258,46 @@ class Deployer:
 
     @staticmethod
     def _indent_block(content: str, indent: str) -> list[str]:
-        content = textwrap.dedent(content.strip("\n"))
+        content = textwrap.dedent(content.expandtabs(4).strip("\n"))
         return [indent + line if line else "" for line in content.splitlines()]
 
+    def _rule_files(self, chain: str) -> list[str]:
+        files = getattr(self, f"custom_{chain}_files", None)
+        if files is not None:
+            return list(files)
+
+        # Compatibility for callers that still set the old singular field.
+        filename = getattr(self, f"custom_{chain}_file", "")
+        return [filename] if filename else []
+
+    def _has_custom_rule_files(self) -> bool:
+        return any(self._rule_files(chain) for chain in ("input", "forward", "output"))
+
     def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list | None = None) -> str:
-        if custom_ruleset == "":
+        if custom_ruleset == "" and not self._has_custom_rule_files():
             custom_ruleset = self.get_promethean_rules()
 
         chain_content = {"input": [], "forward": [], "output": []}
         if custom_ruleset.strip() and self.State.INPUT in self.STATE:
             chain_content["input"].append(("custom ruleset", custom_ruleset))
 
-            selected_ports = self.ports if ports is None else ports
-            if selected_ports:
-                port_rules = "\n".join(
-                    f'ip saddr {self.network} tcp dport {port} ct state new accept '
-                    f'comment "{self.comment or "User configured new open port"}"'
-                    for port in selected_ports
-                )
-                chain_content["input"].append(("user configured ports", port_rules))
+        selected_ports = self.ports if ports is None else ports
+        if selected_ports:
+            port_rules = "\n".join(
+                f'ip saddr {self.network} tcp dport {port} ct state new accept '
+                f'comment "{self.comment or "User configured new open port"}"'
+                for port in selected_ports
+            )
+            chain_content["input"].append(("user configured ports", port_rules))
 
-        for chain, attribute in (
-            ("input", "custom_input_file"),
-            ("forward", "custom_forward_file"),
-            ("output", "custom_output_file"),
-        ):
-            filename = getattr(self, attribute, "")
-            if not filename:
-                continue
-            try:
-                file_rules = Path(filename).read_text()
-            except (OSError, UnicodeError) as error:
-                raise SystemExit(f"Cannot read custom rules {filename}: {error}") from error
-            if file_rules.strip():
-                chain_content[chain].append((f"file {chain} rules", file_rules))
+        for chain in ("input", "forward", "output"):
+            for filename in self._rule_files(chain):
+                try:
+                    file_rules = Path(filename).read_text()
+                except (OSError, UnicodeError) as error:
+                    raise SystemExit(f"Cannot read custom rules {filename}: {error}") from error
+                if file_rules.strip():
+                    chain_content[chain].append((f"file {chain} rules", file_rules))
 
         original_lines = ruleset.splitlines()
         lines = original_lines.copy()
@@ -309,17 +326,25 @@ class Deployer:
                     lines[table[1]:table[1]] = new_chain
                 span = self._find_block(lines, declaration)
 
-            _, closing_line = span
+            opening_line, closing_line = span
+            insertion_line = next(
+                (
+                    line_number
+                    for line_number in range(opening_line + 1, closing_line)
+                    if re.match(r"^\s*pkttype(?:\s|$)", lines[line_number])
+                ),
+                closing_line,
+            )
             closing_indent = lines[closing_line][:-len(lines[closing_line].lstrip())]
             rule_indent = closing_indent + "  "
             additions = []
-            if closing_line and lines[closing_line - 1].strip():
+            if insertion_line and lines[insertion_line - 1].strip():
                 additions.append("")
             for label, content in blocks:
                 additions.append(f"{rule_indent}# Begin of {label}")
                 additions.extend(self._indent_block(content, rule_indent))
                 additions.append(f"{rule_indent}# End of {label}")
-            lines[closing_line:closing_line] = additions
+            lines[insertion_line:insertion_line] = additions
 
         result = "\n".join(lines) + ("\n" if ruleset.endswith("\n") else "")
         changed_lines = []
@@ -328,7 +353,11 @@ class Deployer:
             if operation in ("replace", "insert"):
                 changed_lines.extend(range(final_start + 1, final_end + 1))
 
-        print(f"Adding custom ruleset:\n{c.green}{result}{c.reset}", end="")
+        changed_line_numbers = set(changed_lines)
+        print(f"Adding custom ruleset:\n{c.silver}", end="")
+        for line_number, line in enumerate(lines, start=1):
+            line_color = c.green if line_number in changed_line_numbers else c.silver
+            print(f"{line_color}{line}{c.reset}")
         print(
             f"{c.white}Number of changed lines: "
             f"{c.bright_green}{len(changed_lines)}{c.white}, lines: "
@@ -340,13 +369,21 @@ class Deployer:
 
     def check_args(self):
         action = None
+        options_with_values = {
+            "--port", "-p", "--comment", "-m", "--config", "-C",
+            "--timer", "-t",
+            "--input-file", "-I", "--forward-file", "-F",
+            "--output-file", "-O",
+        }
 
         for i, arg in enumerate(self.args[1:], start=1):
-            if not arg.startswith("--"):
+            if i > 1 and self.args[i - 1] in options_with_values:
+                continue
+            if not arg.startswith("-"):
                 continue
 
             match arg:
-                case "--port":
+                case "--port" | "-p":
                     if i + 1 >= len(self.args):
                         raise SystemExit(f"{c.crimson}--port needs a value{c.reset}")
 
@@ -360,45 +397,45 @@ class Deployer:
 
                     self.ports.append(port)
 
-                case "--comment":
+                case "--comment" | "-m":
                     if i + 1 >= len(self.args):
                         raise SystemExit(f"{c.crimson}--comment needs a value{c.reset}")
 
                     self.comment = self.args[i + 1]
 
-                case "--config":
+                case "--config" | "-C":
                     if i + 1 >= len(self.args):
                         raise SystemExit(f"{c.crimson}--config needs a filename{c.reset}")
 
                     self.config_path = self.args[i + 1]
 
-                case "--input-file":
+                case "--input-file" | "-I":
                     if i + 1 >= len(self.args):
                         raise SystemExit(f"{c.crimson}--input-file needs a filename{c.reset}")
 
                     if self.State.NONE in self.STATE:
                         self.STATE.remove(self.State.NONE)
                     self.STATE.append(self.State.INPUT)
-                    self.custom_input_file = self.args[i + 1]
+                    self.custom_input_files.append(self.args[i + 1])
 
-                case "--forward-file":
+                case "--forward-file" | "-F":
                     if i + 1 >= len(self.args):
                         raise SystemExit(f"{c.crimson}--forward-file needs a filename{c.reset}")
                     if self.State.NONE in self.STATE:
                         self.STATE.remove(self.State.NONE)
                     self.STATE.append(self.State.FORWARD)
-                    self.custom_forward_file = self.args[i + 1]
+                    self.custom_forward_files.append(self.args[i + 1])
 
-                case "--output-file":
+                case "--output-file" | "-O":
                     if i + 1 >= len(self.args):
                         raise SystemExit(f"{c.crimson}--output-file needs a filename{c.reset}")
 
                     if self.State.NONE in self.STATE:
                         self.STATE.remove(self.State.NONE)
                     self.STATE.append(self.State.OUTPUT)
-                    self.custom_output_file = self.args[i + 1]
+                    self.custom_output_files.append(self.args[i + 1])
 
-                case "--timer":
+                case "--timer" | "-t":
                     if i + 1 >= len(self.args):
                         raise SystemExit(f"{c.crimson}--timer needs a value{c.reset}")
 
@@ -407,10 +444,13 @@ class Deployer:
                     except ValueError:
                         raise SystemExit(f"{c.crimson}--timer needs a numerical value{c.reset}")
 
-                case "--deploy":
+                case "--use-current-rules" | "-U":
+                    self.use_current_rules = True
+
+                case "--deploy" | "-X":
                     action = "deploy"
 
-                case "--dry-run":
+                case "--dry-run" | "-D":
                     action = "dry-run"
 
                 case "--optimize":
@@ -419,7 +459,7 @@ class Deployer:
                 case "--help":
                     action = "help"
 
-                case "--status":
+                case "--status" | "-s":
                     action = "status"
 
                 case _:
@@ -435,7 +475,11 @@ class Deployer:
             case "help" | None:
                 return self.help()
             case "status":
-                self.failsafe = Failsafe(self.failsafe_timer, self.backup_file)
+                self.failsafe = Failsafe(
+                    self.failsafe_timer,
+                    self.backup_file,
+                    getattr(self, "config_path", "/etc/nftables.conf"),
+                )
                 self.failsafe.check_main_status()
                 return 0
             case _:
@@ -544,7 +588,7 @@ class Deployer:
         if self.check_env() != 0 or not self.backup_first():
             return 1
         if not self.ruleset:
-            self.ruleset = self.merge_ruleset(self.get_default_rules(), self.get_promethean_rules())
+            self.ruleset = self.merge_ruleset(self.get_base_rules())
         candidate = Path(self.backup_file + ".candidate")
         candidate.write_text(self.ruleset)
         try:
@@ -591,8 +635,8 @@ class Deployer:
         else:
             print(f"{c.crimson}Backup failed{c.reset}. Please check your permissions.")
             return 1
-        self.ruleset = self.get_default_rules()
-        self.custom_ruleset = self.get_promethean_rules()
+        self.ruleset = self.get_base_rules()
+        self.custom_ruleset = ""
         self.ruleset = self.merge_ruleset(self.ruleset, self.custom_ruleset)
         print(f"\nWould save it in: {c.amethyst}{self.config_path}{c.reset}\n")
         with open(self.dry_run_config, "w") as f:
@@ -614,17 +658,18 @@ class Deployer:
         print(f"Usage: {c.light_gold}nft-deploy.py {c.bright_green}[options]{c.reset}")
         print("Options:")
         print()
-        print(f"  {c.golden_orange}--dry-run: {c.light_gold}Do not actually deploy anything{c.reset}")
+        print(f"  {c.golden_orange}--dry-run, -D: {c.light_gold}Do not actually deploy anything{c.reset}")
         print(f"  {c.golden_orange}--help: {c.light_gold}Show this help message{c.reset}")
-        print(f"  {c.golden_orange}--deploy: {c.light_gold}Deploy the default ruleset{c.reset}")
-        print(f"  {c.golden_orange}--config: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
-        print(f"  {c.golden_orange}--input-file: {c.light_gold}Append input-chain rules from a file as last rules{c.reset}")
-        print(f"  {c.golden_orange}--forward-file: {c.light_gold}Append forward-chain rules from a file as last rules{c.reset}")
-        print(f"  {c.golden_orange}--output-file: {c.light_gold}Append output-chain rules from a file as last rules{c.reset}")
-        print(f"  {c.golden_orange}--port: {c.light_gold}Allow a specific port in the config input chain from your personal local subnet{c.reset}")
-        print(f"  {c.golden_orange}--comment: {c.light_gold}Comment to be added into the config file for your ports{c.reset}")
-        print(f"  {c.golden_orange}--timer: {c.light_gold}failsafe timer in seconds (default: 15.0 seconds){c.reset}")
-        print(f"  {c.golden_orange}--status: {c.light_gold}Show system status{c.reset}")
+        print(f"  {c.golden_orange}--deploy, -X: {c.light_gold}Deploy the selected ruleset{c.reset}")
+        print(f"  {c.golden_orange}--config, -C: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
+        print(f"  {c.golden_orange}--use-current-rules, -U: {c.light_gold}Use the current config as the base ruleset{c.reset}")
+        print(f"  {c.golden_orange}--input-file, -I: {c.light_gold}Append input-chain rules from a file; may be repeated{c.reset}")
+        print(f"  {c.golden_orange}--forward-file, -F: {c.light_gold}Append forward-chain rules from a file; may be repeated{c.reset}")
+        print(f"  {c.golden_orange}--output-file, -O: {c.light_gold}Append output-chain rules from a file; may be repeated{c.reset}")
+        print(f"  {c.golden_orange}--port, -p: {c.light_gold}Allow a specific port in the config input chain from your personal local subnet{c.reset}")
+        print(f"  {c.golden_orange}--comment, -m: {c.light_gold}Comment to be added into the config file for your ports{c.reset}")
+        print(f"  {c.golden_orange}--timer, -t: {c.light_gold}failsafe timer in seconds (default: 15.0 seconds){c.reset}")
+        print(f"  {c.golden_orange}--status, -s: {c.light_gold}Show system status{c.reset}")
 
         print()
         quit()

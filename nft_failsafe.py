@@ -88,7 +88,20 @@ class Failsafe:
         active = self.run(["systemctl", "is-active", "nftables.service"])
         rules = self.run([self.nft, "list", "ruleset"])
         loaded = rules.returncode == 0 and bool(rules.stdout.strip())
-        print(f"Ruleset: {highlight_ruleset(rules.stdout)}")
+        try:
+            configured_ruleset = Path(self.config_file).read_text()
+        except (OSError, UnicodeError) as error:
+            configured_ruleset = rules.stdout
+            print(
+                f"{c.crimson}Could not read configured ruleset "
+                f"{self.config_file}: {error}{c.reset}"
+            )
+
+        print("Ruleset:")
+        print(
+            highlight_ruleset(configured_ruleset),
+            end="" if configured_ruleset.endswith("\n") else "\n",
+        )
         print(f"Ruleset active: {rules.returncode}")
 
         print(f"{c.white}Systemd service enabled: {c.lime_green if enabled.returncode == 0 else c.crimson}{enabled.stdout.strip().capitalize()}")
@@ -98,7 +111,7 @@ class Failsafe:
 
         print(
             f"{c.white}Comprehensive system status: {c.bright_green if system_status else c.crimson}{"Complete" if system_status else "Incomplete"}{c.reset}")
-
+        print()
         # Boot enablement is reported separately from the live firewall state.
         return system_status
 

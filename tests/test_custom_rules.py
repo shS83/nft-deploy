@@ -5,6 +5,7 @@ import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('deployer_rules', ROOT / 'nft-deploy.py')
@@ -13,7 +14,7 @@ spec.loader.exec_module(m)
 
 
 class CustomRulesTests(unittest.TestCase):
-    def test_file_rules_are_added_to_input_and_ports_are_preserved(self):
+    def test_file_rules_replace_automatic_promethean_rules_and_preserve_ports(self):
         with tempfile.TemporaryDirectory() as directory:
             file = Path(directory) / 'custom.conf'
             file.write_text('tcp dport 8443 accept\n')
@@ -26,13 +27,13 @@ class CustomRulesTests(unittest.TestCase):
             d.network = '192.0.2.0/24'
             d.comment = None
             base = d.get_default_rules()
-            defaults = d.get_promethean_rules()
             with contextlib.redirect_stdout(io.StringIO()):
-                merged = d.merge_ruleset(base, defaults)
-            self.assertIn(defaults, merged)
+                merged = d.merge_ruleset(base)
+            self.assertNotIn('Accept SMB/CIFS from local network', merged)
             self.assertIn('tcp dport 2222', merged)
             self.assertEqual(merged.count('tcp dport 8443 accept'), 1)
             self.assertLess(merged.index('chain input'), merged.index('tcp dport 8443'))
+            self.assertLess(merged.index('tcp dport 8443'), merged.index('pkttype host'))
             self.assertLess(merged.index('tcp dport 8443'), merged.index('chain forward'))
             self.assertEqual(merged.split('chain forward')[1], base.split('chain forward')[1])
 
@@ -111,3 +112,210 @@ class CustomRulesTests(unittest.TestCase):
             f'{", ".join(str(line) for line in changed_lines)}'
         )
         self.assertIn(expected, output.getvalue())
+
+    def test_printed_base_is_silver_and_inserted_rules_are_green(self):
+        d = m.Deployer.__new__(m.Deployer)
+        d.custom_input_file = ''
+        d.custom_forward_file = ''
+        d.custom_output_file = ''
+        d.STATE = [d.State.INPUT]
+        d.ports = []
+        d.network = '192.0.2.0/24'
+        d.comment = None
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            d.merge_ruleset(d.get_default_rules(), 'tcp dport 1000 accept')
+
+        rendered = output.getvalue()
+        self.assertIn(f'{m.c.silver}table inet filter {{{m.c.reset}', rendered)
+        self.assertIn(
+            f'{m.c.green}    tcp dport 1000 accept{m.c.reset}', rendered
+        )
+
+    def test_promethean_rules_are_used_when_no_rule_files_are_given(self):
+        d = m.Deployer.__new__(m.Deployer)
+        d.custom_input_file = ''
+        d.custom_forward_file = ''
+        d.custom_output_file = ''
+        d.STATE = [d.State.INPUT]
+        d.ports = []
+        d.network = '192.0.2.0/24'
+        d.comment = None
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            merged = d.merge_ruleset(d.get_default_rules())
+
+        self.assertIn('Accept SMB/CIFS from local network', merged)
+
+    def test_tab_indented_file_rules_get_exactly_one_chain_indent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            input_file = Path(directory) / 'input.conf'
+            input_file.write_text('\ttcp dport 8443 accept\n')
+            d = m.Deployer.__new__(m.Deployer)
+            d.custom_input_file = str(input_file)
+            d.custom_forward_file = ''
+            d.custom_output_file = ''
+            d.STATE = [d.State.INPUT]
+            d.ports = []
+            d.network = '192.0.2.0/24'
+            d.comment = None
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                merged = d.merge_ruleset(d.get_default_rules())
+
+            self.assertIn('\n    tcp dport 8443 accept\n', merged)
+            self.assertNotIn('\n        tcp dport 8443 accept\n', merged)
+
+    def test_each_chain_inserts_before_its_own_pkttype_and_leaves_counter_last(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            forward_file = directory / 'forward.conf'
+            output_file = directory / 'output.conf'
+            forward_file.write_text('tcp dport 2000 accept\n')
+            output_file.write_text('tcp dport 3000 accept\n')
+            d = m.Deployer.__new__(m.Deployer)
+            d.custom_input_file = ''
+            d.custom_forward_file = str(forward_file)
+            d.custom_output_file = str(output_file)
+            d.STATE = [d.State.FORWARD, d.State.OUTPUT]
+            d.ports = []
+            d.network = '192.0.2.0/24'
+            d.comment = None
+            base = '''table inet filter {
+  chain forward {
+    type filter hook forward priority filter
+    policy drop
+    pkttype host reject
+    counter
+  }
+  chain output {
+    type filter hook output priority filter
+    policy accept
+    pkttype host reject
+    counter
+  }
+}
+'''
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                merged = d.merge_ruleset(base)
+
+            forward, output = merged.split('chain output', 1)
+            self.assertLess(forward.index('tcp dport 2000'), forward.index('pkttype'))
+            self.assertLess(output.index('tcp dport 3000'), output.index('pkttype'))
+            self.assertRegex(forward, r'pkttype host reject\n    counter\n  }')
+            self.assertRegex(output, r'pkttype host reject\n    counter\n  }')
+
+    def test_multiple_files_per_chain_are_merged_in_argument_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            input_files = [directory / 'input-1', directory / 'input-2']
+            forward_files = [
+                directory / 'forward-1',
+                directory / 'forward-2',
+                directory / 'forward-3',
+            ]
+            output_files = [directory / 'output-1']
+            for number, file in enumerate(input_files, start=1):
+                file.write_text(f'tcp dport 10{number} accept\n')
+            for number, file in enumerate(forward_files, start=1):
+                file.write_text(f'tcp dport 20{number} accept\n')
+            output_files[0].write_text('tcp dport 301 accept\n')
+
+            d = m.Deployer.__new__(m.Deployer)
+            d.custom_input_files = [str(file) for file in input_files]
+            d.custom_forward_files = [str(file) for file in forward_files]
+            d.custom_output_files = [str(file) for file in output_files]
+            d.STATE = [d.State.INPUT, d.State.FORWARD, d.State.OUTPUT]
+            d.ports = []
+            d.network = '192.0.2.0/24'
+            d.comment = None
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                merged = d.merge_ruleset(d.get_default_rules())
+
+            input_chain, remainder = merged.split('chain forward', 1)
+            forward_chain, output_chain = remainder.split('chain output', 1)
+            self.assertLess(input_chain.index('dport 101'), input_chain.index('dport 102'))
+            self.assertLess(forward_chain.index('dport 201'), forward_chain.index('dport 202'))
+            self.assertLess(forward_chain.index('dport 202'), forward_chain.index('dport 203'))
+            self.assertIn('dport 301', output_chain)
+            self.assertNotIn('Accept SMB/CIFS from local network', merged)
+
+    def test_repeated_file_arguments_are_collected(self):
+        d = m.Deployer.__new__(m.Deployer)
+        d.args = [
+            'nft-deploy.py',
+            '--input-file', 'input-1',
+            '--input-file', 'input-2',
+            '--output-file', 'output-1',
+            '--forward-file', 'forward-1',
+            '--forward-file', 'forward-2',
+            '--forward-file', 'forward-3',
+            '--dry-run',
+        ]
+        d.STATE = [d.State.NONE]
+        d.custom_input_files = []
+        d.custom_forward_files = []
+        d.custom_output_files = []
+        d.dry_run = lambda: 0
+
+        self.assertEqual(d.check_args(), 0)
+        self.assertEqual(d.custom_input_files, ['input-1', 'input-2'])
+        self.assertEqual(d.custom_output_files, ['output-1'])
+        self.assertEqual(
+            d.custom_forward_files, ['forward-1', 'forward-2', 'forward-3']
+        )
+
+    def test_short_options_select_current_rules_and_collect_files(self):
+        d = m.Deployer.__new__(m.Deployer)
+        d.args = [
+            'nft-deploy.py', '-U', '-I', 'input', '-O', 'output',
+            '-F', 'forward', '-p', '8443', '-m', 'web service',
+            '-C', '/tmp/current.conf', '-t', '30', '-D',
+        ]
+        d.STATE = [d.State.NONE]
+        d.use_current_rules = False
+        d.custom_input_files = []
+        d.custom_forward_files = []
+        d.custom_output_files = []
+        d.ports = []
+        d.comment = None
+        d.config_path = '/etc/nftables.conf'
+        d.failsafe_timer = 15.0
+        d.dry_run = lambda: 0
+
+        self.assertEqual(d.check_args(), 0)
+        self.assertTrue(d.use_current_rules)
+        self.assertEqual(d.custom_input_files, ['input'])
+        self.assertEqual(d.custom_output_files, ['output'])
+        self.assertEqual(d.custom_forward_files, ['forward'])
+        self.assertEqual(d.ports, [8443])
+        self.assertEqual(d.comment, 'web service')
+        self.assertEqual(d.config_path, '/tmp/current.conf')
+        self.assertEqual(d.failsafe_timer, 30)
+
+    def test_current_config_is_used_as_base_ruleset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'nftables.conf'
+            config.write_text('table inet existing {\n}\n')
+            d = m.Deployer.__new__(m.Deployer)
+            d.use_current_rules = True
+            d.config_path = str(config)
+
+            self.assertEqual(d.get_base_rules(), config.read_text())
+
+    def test_short_status_option_runs_status_check(self):
+        d = m.Deployer.__new__(m.Deployer)
+        d.args = ['nft-deploy.py', '-s']
+        d.failsafe_timer = 15.0
+        d.backup_file = '/tmp/backup'
+
+        with mock.patch.object(m, 'Failsafe') as failsafe:
+            self.assertEqual(d.check_args(), 0)
+
+        failsafe.assert_called_once_with(
+            15.0, '/tmp/backup', '/etc/nftables.conf'
+        )
+        failsafe.return_value.check_main_status.assert_called_once_with()

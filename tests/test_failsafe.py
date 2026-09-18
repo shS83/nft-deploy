@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import subprocess
 import tempfile
@@ -34,6 +36,37 @@ class FailsafeTests(unittest.TestCase):
         guard = self.guard()
         with patch.object(guard, 'run', side_effect=[result(), result(), result()]):
             self.assertFalse(guard.check_main_status())
+
+    def test_status_prints_config_file_with_whitespace_preserved(self):
+        configured = '''table inet filter {
+
+  chain forward {
+    type filter hook forward priority filter
+    policy drop
+  }
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'nftables.conf'
+            config.write_text(configured)
+            guard = self.guard(config=str(config))
+            output = io.StringIO()
+            with patch.object(
+                guard,
+                'run',
+                side_effect=[
+                    result(0, 'enabled'),
+                    result(0, 'active'),
+                    result(0, 'table inet filter { chain forward { } }'),
+                ],
+            ), patch.object(
+                module, 'highlight_ruleset', side_effect=lambda text: text
+            ), contextlib.redirect_stdout(output):
+                self.assertTrue(guard.check_main_status())
+
+            self.assertIn(f'Ruleset:\n{configured}', output.getvalue())
+            self.assertIn('\n\n  chain forward {\n', output.getvalue())
+            self.assertNotIn('type filter hook forward priority filter; policy drop;', output.getvalue())
 
     def test_simulation_never_checks_or_changes_firewall(self):
         guard = self.guard()
