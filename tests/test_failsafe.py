@@ -85,7 +85,18 @@ class FailsafeTests(unittest.TestCase):
             run.assert_not_called()
             copy.assert_not_called()
             prompt.assert_not_called()
-            self.assertIn('--rollback', output.call_args.args[0])
+            self.assertTrue(any('--rollback' in call.args[0] for call in output.call_args_list))
+            self.assertIn('Press any key to continue...', output.call_args.args[0])
+
+    def test_successful_failsafe_ends_with_continue_message(self):
+        guard = self.guard()
+        with patch.object(guard, 'countdown'), patch.object(
+            guard, 'check_main_status', return_value=True
+        ), patch('builtins.print') as output:
+            self.assertTrue(guard.activate_failsafe())
+
+        self.assertIn('Press any key to continue...', output.call_args.args[0])
+        self.assertTrue(output.call_args.kwargs['flush'])
 
     def test_confirmed_rollback_restores_and_verifies(self):
         with tempfile.TemporaryDirectory() as directory:

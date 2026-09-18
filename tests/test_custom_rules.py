@@ -319,3 +319,12 @@ class CustomRulesTests(unittest.TestCase):
             15.0, '/tmp/backup', '/etc/nftables.conf'
         )
         failsafe.return_value.check_main_status.assert_called_once_with()
+
+    def test_short_help_option_runs_help(self):
+        d = m.Deployer.__new__(m.Deployer)
+        d.args = ['nft-deploy.py', '-h']
+
+        with mock.patch.object(d, 'help', return_value=0) as help_method:
+            self.assertEqual(d.check_args(), 0)
+
+        help_method.assert_called_once_with()

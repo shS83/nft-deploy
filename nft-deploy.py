@@ -108,8 +108,6 @@ class Deployer:
         if self.nft is None:
             raise FileNotFoundError(f"{c.crimson}nft is not installed.{c.reset}")
 
-        print(f"DEBUG: {self.backup_file}")
-
     @staticmethod
     def clean_old_backups(
             backup_directory: Path,
@@ -283,6 +281,9 @@ class Deployer:
 
         selected_ports = self.ports if ports is None else ports
         if selected_ports:
+            if self.State.NONE in self.STATE:
+                self.STATE.remove(self.State.NONE)
+            self.STATE.append(self.State.INPUT)
             port_rules = "\n".join(
                 f'ip saddr {self.network} tcp dport {port} ct state new accept '
                 f'comment "{self.comment or "User configured new open port"}"'
@@ -456,7 +457,7 @@ class Deployer:
                 case "--optimize":
                     action = "optimize"
 
-                case "--help":
+                case "--help" | "-h":
                     action = "help"
 
                 case "--status" | "-s":
@@ -659,7 +660,7 @@ class Deployer:
         print("Options:")
         print()
         print(f"  {c.golden_orange}--dry-run, -D: {c.light_gold}Do not actually deploy anything{c.reset}")
-        print(f"  {c.golden_orange}--help: {c.light_gold}Show this help message{c.reset}")
+        print(f"  {c.golden_orange}--help, -h: {c.light_gold}Show this help message{c.reset}")
         print(f"  {c.golden_orange}--deploy, -X: {c.light_gold}Deploy the selected ruleset{c.reset}")
         print(f"  {c.golden_orange}--config, -C: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
         print(f"  {c.golden_orange}--use-current-rules, -U: {c.light_gold}Use the current config as the base ruleset{c.reset}")

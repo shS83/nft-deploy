@@ -116,26 +116,32 @@ class Failsafe:
         return system_status
 
     def activate_failsafe(self):
-        self.countdown()
-        print("Checking nftables status...", flush=True)
         try:
-            if self.simulate_failure:
-                print("SIMULATION: forcing a failed check; firewall state is unchanged.", flush=True)
-            elif self.check_main_status():
-                return True
-        except (OSError, subprocess.SubprocessError) as error:
-            print(f"Firewall check failed: {error}", flush=True)
-        command = shlex.join([
-            "sudo", str(Path(__file__).resolve().with_name("nft-failsafe")),
-            "--rollback", "--backup", str(Path(self.backup_file).resolve()),
-            "--config", str(Path(self.config_file).resolve()),
-        ])
-        print(
-            "nftables is not active or rules could not be verified.\n"
-            "You can restore the backup by running the following command:\n"
-            f"{command}", flush=True,
-        )
-        return False
+            self.countdown()
+            print("Checking nftables status...", flush=True)
+            try:
+                if self.simulate_failure:
+                    print("SIMULATION: forcing a failed check; firewall state is unchanged.", flush=True)
+                elif self.check_main_status():
+                    return True
+            except (OSError, subprocess.SubprocessError) as error:
+                print(f"Firewall check failed: {error}", flush=True)
+            command = shlex.join([
+                "sudo", str(Path(__file__).resolve().with_name("nft-failsafe")),
+                "--rollback", "--backup", str(Path(self.backup_file).resolve()),
+                "--config", str(Path(self.config_file).resolve()),
+            ])
+            print(
+                "nftables is not active or rules could not be verified.\n"
+                "You can restore the backup by running the following command:\n"
+                f"{command}", flush=True,
+            )
+            return False
+        finally:
+            print(
+                f"\n{c.white}Press any key to continue...{c.reset}\n",
+                flush=True,
+            )
 
     def confirm_rollback(self):
         # Only the foreground command may read input; the background guard
