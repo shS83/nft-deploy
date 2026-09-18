@@ -84,6 +84,7 @@ class Deployer:
         self.STATE = [self.State.NONE]
         self.is_dry_run: bool = False
         self.use_current_rules: bool = False
+        self.use_default_profile: bool = False
         self.failsafe: object = None
         self.config_path: str = "/etc/nftables.conf"
         self.ports: list = []
@@ -216,6 +217,16 @@ class Deployer:
         basic_ruleset = b'x\xda\xbd\x8e\xddj\xc3 \x1cG\xef\xf7\x14?\xf2\x00m>\x0c\x89\x97i\xbaAG;\xba\x04\xbak\xa7\xae\x0b5\x1a\xd4\x92=\xfe2z\xb1\x91\x12\xe86\x88z#\x9e\xf3?\x02@\xd3\xc11!,\xa2p1\x1c\x12/\xc2e\x9c\xc1\xf3\x0e\xa23\xd6#J2p\x0f\xe7\x99\x97\xd0\xb2\x07\xe3\\v\x1e\xdc\xb4\xad\xd4\x1eAq\xb9\xd7\xbb\xd5\xb2\xdc<\xd4x\xb3\xa6\x852\x9c\xa9\x01\xf7\xbd\xb1\xa7\xe0\x0e\xb7\x95\xf2\xd9Jt\xa6\x12!\xe9L\xa5<\xcc\xe3\x9bR\xc5\xf6P\xfd=C)\x99)\x93\xcc\x93!\xff\xcf|\xcfs\xee\xfdz\x82R\xa6\xffz\x11c:\xa54\x9c\xc0\x1f\xa5\x7f\xb5\xac\xd1\x0e\x9b\xf5=\xaa}y\xe5\x86\xc3\x9a\x90K#\xe4\xc7X\xa0Y\x9aM\xf0/\xcd\xa1z\xba\xf0g\xf1;\xfe\xc7\x87H\x12O\xf0{\xe3\xfc\xd1\xca\xfay;\x96\xa2t\xd8\x13V\xb1\xc2\xda\xf4Z\x19&\xb0c\x9a\x1d\xa5\x85j\xf4\t\x9cu\xfele\x80O_F~\xdd'
         return zlib.decompress(basic_ruleset).decode("utf-8")
 
+    def get_default_profile_rules(self) -> str:
+        cifs_ports = (137, 138, 139, 445)
+        rules = [
+            f'ip saddr {self.network} tcp dport {port} ct state new accept '
+            f'comment "Accept SMB/CIFS from local network"'
+            for port in cifs_ports
+        ]
+        rules.append('tcp dport ssh accept comment "Allow sshd"')
+        return "\n".join(rules)
+
     @staticmethod
     def _brace_count(line: str) -> int:
         """Count nft block braces, ignoring comments and quoted strings."""
@@ -275,8 +286,11 @@ class Deployer:
         return any(self._rule_files(chain) for chain in ("input", "forward", "output"))
 
     def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list | None = None) -> str:
-        if custom_ruleset == "" and not self._has_custom_rule_files():
-            custom_ruleset = self.get_promethean_rules()
+        if custom_ruleset == "":
+            if getattr(self, "use_default_profile", False):
+                custom_ruleset = self.get_default_profile_rules()
+            elif not self._has_custom_rule_files():
+                custom_ruleset = self.get_promethean_rules()
 
         chain_content = {"input": [], "forward": [], "output": []}
         if custom_ruleset.strip() and self.State.INPUT in self.STATE:
@@ -454,6 +468,12 @@ class Deployer:
                 case "--use-current-rules" | "-U":
                     self.use_current_rules = True
 
+                case "--default" | "-d":
+                    self.use_default_profile = True
+                    if self.State.NONE in self.STATE:
+                        self.STATE.remove(self.State.NONE)
+                    self.STATE.append(self.State.INPUT)
+
                 case "--deploy" | "-X":
                     action = "deploy"
 
@@ -471,6 +491,15 @@ class Deployer:
 
                 case _:
                     raise SystemExit(f"Invalid argument: {c.crimson}{arg}")
+
+        if (
+            getattr(self, "use_current_rules", False)
+            and getattr(self, "use_default_profile", False)
+        ):
+            raise SystemExit(
+                f"{c.crimson}--default cannot be combined with "
+                f"--use-current-rules{c.reset}"
+            )
 
         match action:
             case "deploy":
@@ -730,6 +759,7 @@ class Deployer:
         print(f"  {c.golden_orange}--deploy, -X: {c.light_gold}Deploy the selected ruleset{c.reset}")
         print(f"  {c.golden_orange}--config, -C: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
         print(f"  {c.golden_orange}--use-current-rules, -U: {c.light_gold}Use the current config as the base ruleset{c.reset}")
+        print(f"  {c.golden_orange}--default, -d: {c.light_gold}Deploy the default CIFS and SSH firewall for the local network{c.reset}")
         print(f"  {c.golden_orange}--input-file, -I: {c.light_gold}Append input-chain rules from a file; may be repeated{c.reset}")
         print(f"  {c.golden_orange}--forward-file, -F: {c.light_gold}Append forward-chain rules from a file; may be repeated{c.reset}")
         print(f"  {c.golden_orange}--output-file, -O: {c.light_gold}Append output-chain rules from a file; may be repeated{c.reset}")

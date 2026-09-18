@@ -333,3 +333,48 @@ class CustomRulesTests(unittest.TestCase):
             self.assertEqual(d.check_args(), 0)
 
         help_method.assert_called_once_with()
+
+    def test_default_profile_uses_detected_network_and_only_cifs_and_ssh(self):
+        d = m.Deployer.__new__(m.Deployer)
+        d.custom_input_files = []
+        d.custom_forward_files = []
+        d.custom_output_files = []
+        d.use_default_profile = True
+        d.STATE = [d.State.INPUT]
+        d.ports = []
+        d.network = '192.0.2.0/24'
+        d.comment = None
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            merged = d.merge_ruleset(d.get_default_rules())
+
+        for port in (137, 138, 139, 445):
+            self.assertIn(
+                f'ip saddr 192.0.2.0/24 tcp dport {port}', merged
+            )
+        self.assertIn('tcp dport ssh accept comment "Allow sshd"', merged)
+        self.assertNotIn('10.10.42.0/27', merged)
+        self.assertNotIn('dport 8082', merged)
+        self.assertLess(merged.index('dport 137'), merged.index('pkttype host'))
+
+    def test_default_short_option_selects_input_profile(self):
+        d = m.Deployer.__new__(m.Deployer)
+        d.args = ['nft-deploy.py', '-d', '-X']
+        d.STATE = [d.State.NONE]
+        d.use_current_rules = False
+        d.use_default_profile = False
+        d.deploy = lambda: 0
+
+        self.assertEqual(d.check_args(), 0)
+        self.assertTrue(d.use_default_profile)
+        self.assertIn(d.State.INPUT, d.STATE)
+
+    def test_default_and_current_rules_are_mutually_exclusive(self):
+        d = m.Deployer.__new__(m.Deployer)
+        d.args = ['nft-deploy.py', '-d', '-U', '-D']
+        d.STATE = [d.State.NONE]
+        d.use_current_rules = False
+        d.use_default_profile = False
+
+        with self.assertRaisesRegex(SystemExit, '--default cannot be combined'):
+            d.check_args()
