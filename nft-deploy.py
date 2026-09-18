@@ -1,5 +1,6 @@
 import os
 import difflib
+import fcntl
 import subprocess
 import sys
 import zlib
@@ -104,6 +105,8 @@ class Deployer:
         self.bits: str | int | None | any = network.get("bits", "32")
         self.optimized: str | None = None
         self.tmp_path: str = "/tmp/nft-deploy"
+        self.lock_fd: int | None = None
+        self.lock_transferred: bool = False
         self.nft = shutil.which("nft")
         if self.nft is None:
             raise FileNotFoundError(f"{c.crimson}nft is not installed.{c.reset}")
@@ -491,7 +494,15 @@ class Deployer:
                 return 1
         return 0
 
-    def optimize(self):
+    def optimize(self) -> int:
+        if not self.acquire_deploy_lock():
+            return 1
+        try:
+            return self._optimize_locked()
+        finally:
+            self.release_deploy_lock()
+
+    def _optimize_locked(self) -> int:
         if not self.backup_first():
             print(
                 f"{c.bright_red}"
@@ -582,7 +593,42 @@ class Deployer:
             f"{c.bright_green}{state_names}{c.reset}."
         )
 
+    def acquire_deploy_lock(self) -> bool:
+        lock_directory = Path(getattr(self, "tmp_path", "/tmp/nft-deploy"))
+        lock_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock_file = lock_directory / "deploy.lock"
+        lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(lock_fd)
+            print(f"{c.crimson}Another deployment or failsafe check is already running.{c.reset}")
+            return False
+
+        os.ftruncate(lock_fd, 0)
+        os.write(lock_fd, f"{os.getpid()}\n".encode())
+        self.lock_fd = lock_fd
+        self.lock_transferred = False
+        return True
+
+    def release_deploy_lock(self) -> None:
+        if getattr(self, "lock_fd", None) is None:
+            return
+        if not getattr(self, "lock_transferred", False):
+            fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+        os.close(self.lock_fd)
+        self.lock_fd = None
+        self.lock_transferred = False
+
     def deploy(self) -> int:
+        if not self.acquire_deploy_lock():
+            return 1
+        try:
+            return self._deploy_locked()
+        finally:
+            self.release_deploy_lock()
+
+    def _deploy_locked(self) -> int:
         if os.geteuid() != 0:
             print("Deployment requires root. Run this script with sudo.")
             return 1
@@ -636,6 +682,14 @@ class Deployer:
             candidate.unlink(missing_ok=True)
 
     def dry_run(self) -> int:
+        if not self.acquire_deploy_lock():
+            return 1
+        try:
+            return self._dry_run_locked()
+        finally:
+            self.release_deploy_lock()
+
+    def _dry_run_locked(self) -> int:
         if not self.backup_first():
             print(
                 f"{c.bright_red}"
@@ -711,15 +765,27 @@ class Deployer:
                         f"Cannot open failsafe terminal {sudo_tty}: {error}. "
                         "Deployment aborted before changing the firewall."
                     ) from error
+            command = [
+                sys.executable, "-u", str(Path(self.pwd) / "nft_failsafe.py"),
+                str(int(self.failsafe_timer)), self.backup_file,
+                "--config", self.config_path, "--wait-for-parent",
+            ]
+            lock_fd = getattr(self, "lock_fd", None)
+            pass_fds = ()
+            if lock_fd is not None:
+                command.extend(["--lock-fd", str(lock_fd)])
+                pass_fds = (lock_fd,)
+
             program = subprocess.Popen(
-                [sys.executable, "-u", str(Path(self.pwd) / "nft_failsafe.py"),
-                 str(int(self.failsafe_timer)), self.backup_file,
-                 "--config", self.config_path, "--wait-for-parent"],
+                command,
                 stdin=subprocess.PIPE,
                 stdout=terminal_fd,
                 stderr=terminal_fd,
                 start_new_session=True,
+                pass_fds=pass_fds,
             )
+            if lock_fd is not None:
+                self.lock_transferred = True
         finally:
             if terminal_fd is not None:
                 os.close(terminal_fd)
