@@ -24,18 +24,37 @@ class FailsafeTests(unittest.TestCase):
 
     def test_disabled_boot_service_can_have_healthy_live_firewall(self):
         guard = self.guard()
-        with patch.object(guard, 'run', side_effect=[result(1, 'disabled'), result(0, 'active'), result(0, 'table ip firewall {}')]):
-            self.assertTrue(guard.check_main_status())
+        with patch.object(guard, 'run', side_effect=[result(1, 'disabled'), result(0, 'active'), result(0, 'table ip firewall {}'), result()]):
+            self.assertFalse(guard.check_main_status())
 
     def test_ruleset_permission_error_is_unhealthy(self):
         guard = self.guard()
-        with patch.object(guard, 'run', side_effect=[result(), result(), result(1)]):
+        with patch.object(guard, 'run', side_effect=[result(), result(), result(1), result()]):
             self.assertFalse(guard.check_main_status())
 
     def test_empty_ruleset_is_unhealthy(self):
         guard = self.guard()
-        with patch.object(guard, 'run', side_effect=[result(), result(), result()]):
+        with patch.object(guard, 'run', side_effect=[result(), result(), result(), result()]):
             self.assertFalse(guard.check_main_status())
+
+    def test_invalid_config_is_unhealthy_even_if_live_rules_are_loaded(self):
+        guard = self.guard()
+        with patch.object(
+            guard,
+            'run',
+            side_effect=[
+                result(0, 'enabled'),
+                result(0, 'active'),
+                result(0, 'table inet filter {}'),
+                result(1),
+            ],
+        ) as run:
+            self.assertFalse(guard.check_main_status())
+
+        self.assertEqual(
+            run.call_args_list[3].args[0],
+            ['/usr/bin/nft', '-c', '-f', 'config'],
+        )
 
     def test_status_prints_config_file_with_whitespace_preserved(self):
         configured = '''table inet filter {
@@ -58,6 +77,7 @@ class FailsafeTests(unittest.TestCase):
                     result(0, 'enabled'),
                     result(0, 'active'),
                     result(0, 'table inet filter { chain forward { } }'),
+                    result(),
                 ],
             ), patch.object(
                 module, 'highlight_ruleset', side_effect=lambda text: text
@@ -76,16 +96,28 @@ class FailsafeTests(unittest.TestCase):
             check.assert_not_called()
             run.assert_not_called()
             copy.assert_not_called()
-            self.assertIn('--rollback', output.call_args.args[0])
+            self.assertTrue(any('SIMULATION' in call.args[0] for call in output.call_args_list))
 
-    def test_failed_check_only_offers_rollback_command(self):
-        guard = self.guard()
-        with patch.object(guard, 'check_main_status', return_value=False), patch.object(guard, 'run') as run, patch.object(module.shutil, 'copyfile') as copy, patch('builtins.input') as prompt, patch('builtins.print') as output:
-            self.assertFalse(guard.activate_failsafe())
-            run.assert_not_called()
-            copy.assert_not_called()
-            prompt.assert_not_called()
-            self.assertTrue(any('--rollback' in call.args[0] for call in output.call_args_list))
+    def test_failed_check_automatically_restores_backup_and_restarts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup = Path(directory) / 'backup'
+            config = Path(directory) / 'config'
+            backup.write_text('old rules')
+            config.write_text('broken rules')
+            guard = self.guard(str(backup), str(config))
+            with patch.object(guard, 'countdown'), patch.object(
+                guard, 'check_main_status', side_effect=[False, True]
+            ), patch.object(
+                guard, 'run', side_effect=[result(), result()]
+            ) as run, patch.object(module.time, 'sleep') as sleep, patch(
+                'builtins.print'
+            ) as output:
+                self.assertTrue(guard.activate_failsafe())
+
+            self.assertEqual(config.read_text(), 'old rules')
+            self.assertEqual(run.call_args_list[0].args[0], ['/usr/bin/nft', '-c', '-f', str(backup)])
+            self.assertEqual(run.call_args_list[1].args[0], ['systemctl', 'restart', 'nftables.service'])
+            self.assertEqual(sleep.call_count, 3)
             self.assertIn('Press any key to continue...', output.call_args.args[0])
 
     def test_successful_failsafe_ends_with_continue_message(self):
@@ -105,12 +137,12 @@ class FailsafeTests(unittest.TestCase):
             backup.write_text('old rules')
             config.write_text('new rules')
             guard = self.guard(str(backup), str(config))
-            with patch.object(module.sys.stdin, 'isatty', return_value=True), patch.object(module.os, 'tcgetpgrp', return_value=module.os.getpgrp()), patch('builtins.input', return_value='k'), patch.object(guard, 'check_main_status', return_value=True), patch.object(guard, 'run', side_effect=[result(), result(), result()]) as run:
+            with patch.object(module.sys.stdin, 'isatty', return_value=True), patch.object(module.os, 'tcgetpgrp', return_value=module.os.getpgrp()), patch('builtins.input', return_value='yes'), patch.object(guard, 'check_main_status', return_value=True), patch.object(guard, 'run', side_effect=[result(), result()]) as run, patch.object(module.time, 'sleep'):
                 self.assertTrue(guard.confirm_rollback())
                 self.assertEqual(config.read_text(), 'old rules')
                 self.assertEqual(backup.read_text(), 'old rules')
                 self.assertEqual(run.call_args_list[0].args[0], ['/usr/bin/nft', '-c', '-f', str(backup)])
-                self.assertEqual(run.call_args_list[2].args[0], ['systemctl', 'restart', 'nftables.service'])
+                self.assertEqual(run.call_args_list[1].args[0], ['systemctl', 'restart', 'nftables.service'])
 
     def test_declined_or_empty_answer_does_not_change_firewall(self):
         for answer in ('', 'e', 'unexpected'):

@@ -358,7 +358,10 @@ class Deployer:
         print(f"Adding custom ruleset:\n{c.silver}", end="")
         for line_number, line in enumerate(lines, start=1):
             line_color = c.green if line_number in changed_line_numbers else c.silver
-            print(f"{line_color}{line}{c.reset}")
+            print(
+                f"{c.cyan}{line_number:>4}: "
+                f"{line_color}{line}{c.reset}"
+            )
         print(
             f"{c.white}Number of changed lines: "
             f"{c.bright_green}{len(changed_lines)}{c.white}, lines: "
@@ -586,7 +589,16 @@ class Deployer:
         if self.failsafe_timer < 0:
             print("Failsafe timer cannot be negative.")
             return 1
-        if self.check_env() != 0 or not self.backup_first():
+        if self.check_env() != 0:
+            return 1
+        print(f"{c.white}Validating current configuration before deployment...{c.reset}")
+        if self.test_rules(self.config_path) != 0:
+            print(
+                f"{c.crimson}Deployment aborted: the current configuration "
+                f"is not valid, so it cannot be used as a rollback point.{c.reset}"
+            )
+            return 1
+        if not self.backup_first():
             return 1
         if not self.ruleset:
             self.ruleset = self.merge_ruleset(self.get_base_rules())

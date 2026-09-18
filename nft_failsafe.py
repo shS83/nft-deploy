@@ -3,7 +3,6 @@ import math
 import os
 import re
 import shutil
-import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -87,7 +86,9 @@ class Failsafe:
         enabled = self.run(["systemctl", "is-enabled", "nftables.service"])
         active = self.run(["systemctl", "is-active", "nftables.service"])
         rules = self.run([self.nft, "list", "ruleset"])
+        configured = self.run([self.nft, "-c", "-f", self.config_file])
         loaded = rules.returncode == 0 and bool(rules.stdout.strip())
+        configuration_valid = configured.returncode == 0
         try:
             configured_ruleset = Path(self.config_file).read_text()
         except (OSError, UnicodeError) as error:
@@ -107,7 +108,13 @@ class Failsafe:
         print(f"{c.white}Systemd service enabled: {c.lime_green if enabled.returncode == 0 else c.crimson}{enabled.stdout.strip().capitalize()}")
         print(f"{c.white}Systemd service active: {c.lime_green if active.returncode == 0 else c.peach}{active.stdout.strip().capitalize()}")
         print(f"{c.white}Nftables ruleset loaded: {c.lime_green if loaded != 0 else c.crimson}{loaded}")
-        system_status = enabled.returncode == 0 and rules.returncode == 0 and loaded
+        print(f"{c.white}Configuration valid: {c.lime_green if configuration_valid else c.crimson}{configuration_valid}")
+        system_status = (
+            enabled.returncode == 0
+            and active.returncode == 0
+            and loaded
+            and configuration_valid
+        )
 
         print(
             f"{c.white}Comprehensive system status: {c.bright_green if system_status else c.crimson}{"Complete" if system_status else "Incomplete"}{c.reset}")
@@ -122,26 +129,51 @@ class Failsafe:
             try:
                 if self.simulate_failure:
                     print("SIMULATION: forcing a failed check; firewall state is unchanged.", flush=True)
+                    return False
                 elif self.check_main_status():
                     return True
             except (OSError, subprocess.SubprocessError) as error:
                 print(f"Firewall check failed: {error}", flush=True)
-            command = shlex.join([
-                "sudo", str(Path(__file__).resolve().with_name("nft-failsafe")),
-                "--rollback", "--backup", str(Path(self.backup_file).resolve()),
-                "--config", str(Path(self.config_file).resolve()),
-            ])
             print(
-                "nftables is not active or rules could not be verified.\n"
-                "You can restore the backup by running the following command:\n"
-                f"{command}", flush=True,
-            )
-            return False
-        finally:
-            print(
-                f"\n{c.white}Press any key to continue...{c.reset}\n",
+                f"{c.crimson}nftables is not healthy. Starting automatic rollback.{c.reset}",
                 flush=True,
             )
+            return self.rollback()
+        finally:
+            print(
+                f"\n{c.white}Press any key to continue...{c.reset}",
+                flush=True,
+            )
+
+    def rollback(self) -> bool:
+        print(f"{c.white}Validating rollback configuration: {c.amethyst}{self.backup_file}{c.reset}", flush=True)
+        if self.run([self.nft, "-c", "-f", self.backup_file]).returncode != 0:
+            print(f"{c.crimson}Backup verification failed. Automatic rollback was aborted.{c.reset}", flush=True)
+            return False
+
+        time.sleep(1)
+        print(f"{c.white}Restoring rollback configuration to: {c.coral}{self.config_file}{c.reset}", flush=True)
+        try:
+            shutil.copyfile(self.backup_file, self.config_file)
+        except OSError as error:
+            print(f"{c.crimson}Could not restore rollback configuration: {error}{c.reset}", flush=True)
+            return False
+
+        time.sleep(1)
+        print(f"{c.white}Restarting {c.bright_green}nftables.service{c.reset}...", flush=True)
+        restart = self.run(["systemctl", "restart", "nftables.service"])
+        if restart.returncode != 0:
+            print(f"{c.crimson}nftables restart failed after rollback.{c.reset}", flush=True)
+            return False
+
+        time.sleep(1)
+        healthy = self.check_main_status()
+        if healthy:
+            print(f"{c.green}Rollback restored and verified the pre-deployment configuration.{c.reset}", flush=True)
+            return True
+
+        print(f"{c.crimson}ERROR:{c.reset} Firewall recovery failed. Manual intervention required.", flush=True)
+        return False
 
     def confirm_rollback(self):
         # Only the foreground command may read input; the background guard
@@ -159,20 +191,7 @@ class Failsafe:
         if answer not in ("y", "yes"):
             print("Rollback canceled. No changes were made.", flush=True)
             return False
-        # Validate the backup before replacing the current configuration.
-        if self.run([self.nft, "-c", "-f", self.backup_file]).returncode != 0:
-            print(f"{c.crimson}Backup verification failed. No rollback was done.{c.reset}", flush=True)
-            return False
-        print(f"Restoring backup: {self.backup_file}", flush=True)
-        shutil.copyfile(self.backup_file, self.config_file)
-        restored = self.run([self.nft, "-f", self.config_file])
-        restart = self.run(["systemctl", "restart", "nftables.service"])
-        healthy = self.check_main_status()
-        if restored.returncode == 0 and restart.returncode == 0 and healthy:
-            print(f"{c.green}Backup restored and firewall verified.{c.reset}", flush=True)
-            return True
-        print(f"{c.crimson}ERROR:{c.reset} Firewall recovery failed. Manual intervention required.", flush=True)
-        return False
+        return self.rollback()
 
     def poll(self, codeword=""):
         if codeword.casefold() == "status":

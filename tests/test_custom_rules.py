@@ -132,6 +132,11 @@ class CustomRulesTests(unittest.TestCase):
         self.assertIn(
             f'{m.c.green}    tcp dport 1000 accept{m.c.reset}', rendered
         )
+        changed_line = next(
+            line for line in rendered.splitlines() if 'tcp dport 1000 accept' in line
+        )
+        self.assertIn(str(m.c.cyan), changed_line)
+        self.assertRegex(changed_line, r'\d+: ')
 
     def test_promethean_rules_are_used_when_no_rule_files_are_given(self):
         d = m.Deployer.__new__(m.Deployer)
