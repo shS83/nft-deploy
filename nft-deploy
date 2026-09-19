@@ -1,7 +1,12 @@
 #!/bin/bash
 if [[ "${NFTD_DIR:-}" == "" ]]; then
-[[ -f ./nft-deploy.py && -f ./nft-failsafe.py ]] && ./.venv/bin/python3 ./nft-deploy.py "$@"
+  if [[ -f ./nft-deploy.py && -f ./nft-failsafe.py ]]; then
+    ./.venv/bin/python3 ./nft-deploy.py "$@"
+  else
+    exit 1
+  fi
 else
 cd "$NFTD_DIR" || exit 1
-sudo .venv/bin/python3 ./nft-deploy.py "$@"
+sudo ./.venv/bin/python3 ./nft-deploy.py "$@"
 fi
+exit 0
