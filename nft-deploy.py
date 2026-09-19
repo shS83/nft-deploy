@@ -88,10 +88,15 @@ class Deployer:
         self.failsafe: object = None
         self.config_path: str = "/etc/nftables.conf"
         self.ports: list = []
+        self.close_ports: list = []
+        self.port_chains: list[str] = []
         self.default_ruleset: str = ""
         self.custom_input_files: list[str] = []
         self.custom_forward_files: list[str] = []
         self.custom_output_files: list[str] = []
+        self.custom_input_rules: list[str] = []
+        self.custom_output_rules: list[str] = []
+        self.custom_forward_rules: list[str] = []
         self.dry_run_config: str | Path = "/tmp/nft-deploy/nft-dry-run-rules.conf"
         self.custom_ruleset: str = ""
         self.ruleset: str = ""
@@ -100,7 +105,6 @@ class Deployer:
         self.failsafe_timer: float = 15.0
         self.user_home: str | None = os.getenv("HOME")
         self.backup_file: str = "/tmp/nft-deploy/nftables.conf.backup"
-        self.ports: list = []
         network = get_default_network()
         self.network: str | int | None | any = network.get("network", "127.0.0.1")
         self.bits: str | int | None | any = network.get("bits", "32")
@@ -285,11 +289,14 @@ class Deployer:
     def _has_custom_rule_files(self) -> bool:
         return any(self._rule_files(chain) for chain in ("input", "forward", "output"))
 
-    def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list | None = None) -> str:
+    def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list | None = None, disabled_ports: list | None = None) -> str:
         if custom_ruleset == "":
             if getattr(self, "use_default_profile", False):
                 custom_ruleset = self.get_default_profile_rules()
-            elif not self._has_custom_rule_files():
+            elif not self._has_custom_rule_files() and not any(
+                getattr(self, f"custom_{chain}_rules", [])
+                for chain in ("input", "forward", "output")
+            ):
                 custom_ruleset = self.get_promethean_rules()
 
         chain_content = {"input": [], "forward": [], "output": []}
@@ -297,16 +304,31 @@ class Deployer:
             chain_content["input"].append(("custom ruleset", custom_ruleset))
 
         selected_ports = self.ports if ports is None else ports
+        disabled_ports = getattr(self, "close_ports", []) if disabled_ports is None else disabled_ports
+        port_chains = getattr(self, "port_chains", []) or ["input"]
+
         if selected_ports:
             if self.State.NONE in self.STATE:
                 self.STATE.remove(self.State.NONE)
-            self.STATE.append(self.State.INPUT)
+            for chain in port_chains:
+                state = getattr(self.State, chain.upper())
+                if state not in self.STATE:
+                    self.STATE.append(state)
             port_rules = "\n".join(
                 f'ip saddr {self.network} tcp dport {port} ct state new accept '
                 f'comment "{self.comment or "User configured new open port"}"'
                 for port in selected_ports
             )
-            chain_content["input"].append(("user configured ports", port_rules))
+            for chain in port_chains:
+                chain_content[chain].append(("user configured ports", port_rules))
+
+        if disabled_ports:
+            if self.State.NONE in self.STATE:
+                self.STATE.remove(self.State.NONE)
+            for chain in port_chains:
+                state = getattr(self.State, chain.upper())
+                if state not in self.STATE:
+                    self.STATE.append(state)
 
         for chain in ("input", "forward", "output"):
             for filename in self._rule_files(chain):
@@ -316,11 +338,14 @@ class Deployer:
                     raise SystemExit(f"Cannot read custom rules {filename}: {error}") from error
                 if file_rules.strip():
                     chain_content[chain].append((f"file {chain} rules", file_rules))
+            inline_rules = getattr(self, f"custom_{chain}_rules", [])
+            if inline_rules:
+                chain_content[chain].append((f"inline {chain} rules", "\n".join(inline_rules)))
 
         original_lines = ruleset.splitlines()
         lines = original_lines.copy()
         for chain, blocks in chain_content.items():
-            if not blocks:
+            if not blocks and not (disabled_ports and chain in port_chains):
                 continue
 
             declaration = re.compile(rf"^\s*chain\s+(?:{chain}|[\"']{chain}[\"'])\s*\{{")
@@ -364,10 +389,17 @@ class Deployer:
                 additions.append(f"{rule_indent}# End of {label}")
             lines[insertion_line:insertion_line] = additions
 
+        # Close ports after merging so custom files cannot reintroduce an opening.
+        for chain in port_chains if disabled_ports else []:
+            self._close_chain_ports(lines, chain, disabled_ports)
+
         result = "\n".join(lines) + ("\n" if ruleset.endswith("\n") else "")
         changed_lines = []
+        removed_lines = 0
         matcher = difflib.SequenceMatcher(None, original_lines, lines, autojunk=False)
-        for operation, _, _, final_start, final_end in matcher.get_opcodes():
+        for operation, original_start, original_end, final_start, final_end in matcher.get_opcodes():
+            if operation in ("replace", "delete"):
+                removed_lines += original_end - original_start
             if operation in ("replace", "insert"):
                 changed_lines.extend(range(final_start + 1, final_end + 1))
 
@@ -386,15 +418,58 @@ class Deployer:
             f"{c.reset}"
         )
         print(f"{c.deep_purple}Aces!{c.reset}")
+        if removed_lines:
+            print(f"Removed or replaced original lines: {removed_lines}")
         return result
+
+    def _close_chain_ports(self, lines: list[str], chain: str, ports: list[int]) -> None:
+        declaration = re.compile(rf"^\s*chain\s+(?:{chain}|[\"']{chain}[\"'])\s*\{{")
+        for port in dict.fromkeys(ports):
+            opening, closing = self._find_block(lines, declaration)
+            # Require one numeric destination port; do not delete sets or ranges
+            # that also allow other ports. Ignore strings and comments when matching.
+            destination = re.compile(rf"\btcp\s+dport\s+(?:==\s*)?{port}(?=\s|;|$)")
+            matches = []
+            for index in range(opening + 1, closing):
+                code = re.sub(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\#.*$''', "", lines[index]).strip()
+                if ";" in code.rstrip(";") or "{" in code or "}" in code:
+                    continue
+                if destination.search(code) and re.search(r"\baccept\s*;?$", re.sub(r"\bcomment\s*$", "", code).strip()):
+                    matches.append(index)
+            if matches:
+                for index in reversed(matches):
+                    del lines[index]
+                    # Only remove our matching markers when this deletion
+                    # leaves them directly adjacent. Other comments stay intact.
+                    begin = re.fullmatch(
+                        r"\s*# Begin of (user configured ports|custom ruleset|(?:file|inline) (?:input|forward|output) rules)\s*",
+                        lines[index - 1],
+                    )
+                    if begin and lines[index].strip() == f"# End of {begin.group(1)}":
+                        del lines[index - 1:index + 1]
+                continue
+
+            # Insert before executable rules, including broad accept rules.
+            insertion = opening + 1
+            while insertion < closing:
+                code = lines[insertion].strip()
+                if code and not code.startswith("#") and not re.match(r"^(?:type|policy|flags|comment)\b", code):
+                    break
+                insertion += 1
+            indent = lines[closing][:len(lines[closing]) - len(lines[closing].lstrip())] + "  "
+            rule = f'tcp dport {port} drop comment "{self.comment or "User configured closed port"}"'
+            if any(line.strip() == rule for line in lines[opening + 1:closing]):
+                continue
+            lines.insert(insertion, indent + rule)
 
     def check_args(self):
         action = None
         options_with_values = {
-            "--port", "-p", "--comment", "-m", "--config", "-C",
+            "--port", "--ports", "-p", "--comment", "-m", "--config", "-C",
             "--timer", "-t",
             "--input-file", "-I", "--forward-file", "-F",
-            "--output-file", "-O",
+            "--output-file", "-O", "--close-port", "--close-ports", "-x",
+            "--input-rule", "--output-rule", "--forward-rule",
         }
 
         for i, arg in enumerate(self.args[1:], start=1):
@@ -404,19 +479,56 @@ class Deployer:
                 continue
 
             match arg:
-                case "--port" | "-p":
+                case "--port" | "--ports" | "-p":
                     if i + 1 >= len(self.args):
-                        raise SystemExit(f"{c.crimson}--port needs a value{c.reset}")
+                        raise SystemExit(f"{c.crimson}{arg} needs a value{c.reset}")
 
                     try:
-                        port = int(self.args[i + 1])
+                        ports = [int(value.strip()) for value in self.args[i + 1].split(",")]
                     except ValueError:
-                        raise SystemExit(f"{c.crimson}--port needs a numerical value{c.reset}")
+                        raise SystemExit(f"{c.crimson}{arg} needs a port or comma-separated numerical ports{c.reset}")
 
-                    if not 1 <= port <= 65535:
-                        raise SystemExit(f"{c.crimson}--port must be between 1 and 65535{c.reset}")
+                    if any(not 1 <= port <= 65535 for port in ports):
+                        raise SystemExit(f"{c.crimson}{arg} ports must be between 1 and 65535{c.reset}")
 
-                    self.ports.append(port)
+                    self.ports.extend(ports)
+
+                case "--input" | "--output" | "--forward":
+                    if not hasattr(self, "port_chains"):
+                        self.port_chains = []
+                    if arg[2:] not in self.port_chains:
+                        self.port_chains.append(arg[2:])
+
+                case "--close-port" | "--close-ports" | "-x":
+                    if i + 1 >= len(self.args):
+                        raise SystemExit(f"{c.crimson}{arg} needs a value{c.reset}")
+
+                    try:
+                        ports = [int(value.strip()) for value in self.args[i + 1].split(",")]
+                    except ValueError:
+                        raise SystemExit(f"{c.crimson}{arg} needs a port or comma-separated numerical ports{c.reset}")
+
+                    if any(not 1 <= port <= 65535 for port in ports):
+                        raise SystemExit(f"{c.crimson}{arg} ports must be between 1 and 65535{c.reset}")
+
+                    self.close_ports.extend(ports)
+
+                case "--input-rule" | "--output-rule" | "--forward-rule":
+                    if i + 1 >= len(self.args):
+                        raise SystemExit(f"{c.crimson}{arg} needs a rule{c.reset}")
+                    rule = self.args[i + 1]
+                    if not rule.strip() or len(rule.splitlines()) != 1 or "\n" in rule or "\r" in rule or rule.lstrip().startswith("--"):
+                        raise SystemExit(f"{c.crimson}{arg} needs a non-empty single-line rule{c.reset}")
+                    chain = arg[2:-5]
+                    attribute = f"custom_{chain}_rules"
+                    if not hasattr(self, attribute):
+                        setattr(self, attribute, [])
+                    getattr(self, attribute).append(rule.strip())
+                    if self.State.NONE in self.STATE:
+                        self.STATE.remove(self.State.NONE)
+                    state = getattr(self.State, chain.upper())
+                    if state not in self.STATE:
+                        self.STATE.append(state)
 
                 case "--comment" | "-m":
                     if i + 1 >= len(self.args):
@@ -761,9 +873,12 @@ class Deployer:
         print(f"  {c.golden_orange}--use-current-rules, -U: {c.light_gold}Use the current config as the base ruleset{c.reset}")
         print(f"  {c.golden_orange}--default, -d: {c.light_gold}Deploy the default CIFS and SSH firewall for the local network{c.reset}")
         print(f"  {c.golden_orange}--input-file, -I: {c.light_gold}Append input-chain rules from a file; may be repeated{c.reset}")
+        print(f"  {c.golden_orange}--input-rule, --output-rule, --forward-rule: {c.light_gold}Append one quoted rule to the named chain; may be repeated{c.reset}")
         print(f"  {c.golden_orange}--forward-file, -F: {c.light_gold}Append forward-chain rules from a file; may be repeated{c.reset}")
         print(f"  {c.golden_orange}--output-file, -O: {c.light_gold}Append output-chain rules from a file; may be repeated{c.reset}")
-        print(f"  {c.golden_orange}--port, -p: {c.light_gold}Allow a specific port in the config input chain from your personal local subnet{c.reset}")
+        print(f"  {c.golden_orange}--port, --ports, -p: {c.light_gold}Allow TCP destination ports in selected chains from your local subnet; takes comma-separated ports (80,443), may be repeated{c.reset}")
+        print(f"  {c.golden_orange}--close-port, --close-ports, -x: {c.light_gold}Remove numeric single-port TCP accept rules, or prepend a drop rule if none exist; takes comma-separated ports (80,443), may be repeated{c.reset}")
+        print(f"  {c.golden_orange}--input, --output, --forward: {c.light_gold}Select chains for all port options (default: input); may be combined{c.reset}")
         print(f"  {c.golden_orange}--comment, -m: {c.light_gold}Comment to be added into the config file for your ports{c.reset}")
         print(f"  {c.golden_orange}--timer, -t: {c.light_gold}failsafe timer in seconds (default: 15.0 seconds){c.reset}")
         print(f"  {c.golden_orange}--status, -s: {c.light_gold}Show system status{c.reset}")
