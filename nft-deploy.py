@@ -1021,7 +1021,7 @@ class Deployer:
         print(f"  {c.golden_orange}--config, -C: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
         print(f"  {c.golden_orange}--use-current-rules, -U: {c.light_gold}Use the current config as the base ruleset{c.reset}")
         print(f"  {c.golden_orange}--default, -d: {c.light_gold}Deploy the default CIFS and SSH firewall for the local network{c.reset}")
-        print(f"  {c.golden_orange}--prometheus: {c.light_gold}Use default rules supplemented with Promethean rules (for DEBUG purposes only){c.reset}")
+        # print(f"  {c.golden_orange}--prometheus: {c.light_gold}Use default rules supplemented with Promethean rules (for DEBUG purposes only){c.reset}")
         print(f"  {c.golden_orange}--input-file, -I: {c.light_gold}Append input-chain rules from a file; may be repeated{c.reset}")
         print(f"  {c.golden_orange}--input-rule, --output-rule, --forward-rule: {c.light_gold}Append one quoted rule to the named chain; may be repeated{c.reset}")
         print(f"  {c.golden_orange}--forward-file, -F: {c.light_gold}Append forward-chain rules from a file; may be repeated{c.reset}")
