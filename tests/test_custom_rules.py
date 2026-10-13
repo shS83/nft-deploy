@@ -12,7 +12,7 @@ spec.loader.exec_module(m)
 
 
 class CustomRulesTests(unittest.TestCase):
-    def test_file_rules_are_added_to_input_and_ports_are_preserved(self):
+    def test_file_rules_replace_custom_defaults_and_explicit_ports_are_added(self):
         with tempfile.TemporaryDirectory() as directory:
             file = Path(directory) / 'custom.conf'
             file.write_text('tcp dport 8443 accept\n')
@@ -24,8 +24,8 @@ class CustomRulesTests(unittest.TestCase):
             base = d.get_default_rules()
             defaults = d.get_promethean_rules()
             with contextlib.redirect_stdout(io.StringIO()):
-                merged = d.merge_ruleset(base, defaults)
-            self.assertIn(defaults, merged)
+                merged = d.merge_ruleset(base, defaults, ports=d.ports)
+            self.assertNotIn(defaults, merged)
             self.assertIn('tcp dport 2222', merged)
             self.assertEqual(merged.count('tcp dport 8443 accept'), 1)
             self.assertLess(merged.index('chain input'), merged.index('tcp dport 8443'))

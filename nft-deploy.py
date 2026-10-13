@@ -80,8 +80,9 @@ class Deployer:
         self.custom_ruleset: str = ""
         self.ruleset: str = ""
         self.comment: str | None = None
+        self.remove_pattern: str | None = None
         self.compressed_config: bytes = b""
-        self.failsafe_timer: float = 60.0
+        self.failsafe_timer: float = 15.0
         self.user_home: str | None = os.getenv("HOME")
         self.backup_file: str = "/tmp/nft-deploy/nftables.conf.backup"
         network = get_default_network()
@@ -276,10 +277,15 @@ class Deployer:
 
     def check_args(self):
         action = None
+        consumed = set()
 
         for i, arg in enumerate(self.args[1:], start=1):
+            if i in consumed:
+                continue
             if not arg.startswith("--"):
                 continue
+            if arg in ("--port", "--comment", "--config", "--file", "--timer", "--remove"):
+                consumed.add(i + 1)
 
             match arg:
                 case "--port":
@@ -326,6 +332,13 @@ class Deployer:
                 case "--deploy":
                     action = "deploy"
 
+                case "--remove":
+                    if i + 1 >= len(self.args) or self.args[i + 1].startswith("--"):
+                        raise SystemExit(f"{c.crimson}--remove needs a rule or regex{c.reset}")
+                    if self.remove_pattern is not None:
+                        raise SystemExit("Specify --remove only once.")
+                    self.remove_pattern = self.args[i + 1]
+
                 case "--dry-run":
                     action = "dry-run"
 
@@ -337,6 +350,11 @@ class Deployer:
 
                 case _:
                     raise SystemExit(f"Invalid argument: {c.crimson}{arg}")
+
+        if self.remove_pattern is not None and action != "help":
+            if action is not None or self.ports or self.custom_file or self.comment:
+                raise SystemExit("--remove cannot be combined with another action, --port, --file or --comment.")
+            return self.remove_rule()
 
         match action:
             case "deploy":
@@ -406,7 +424,50 @@ class Deployer:
             print("Excellent! Clean config file.")
         return result.returncode
 
-    def deploy(self):
+    def remove_rule(self):
+        if not self.remove_pattern or not self.remove_pattern.strip():
+            print("--remove needs a non-empty rule or regex.")
+            return 1
+        try:
+            pattern = re.compile(self.remove_pattern)
+        except re.error as error:
+            print(f"Invalid removal regex: {error}")
+            return 1
+        try:
+            with open(self.config_path, newline="") as config:
+                original = config.read()
+        except (OSError, UnicodeError) as error:
+            print(f"Cannot read configuration {self.config_path}: {error}")
+            return 1
+
+        lines = original.splitlines(keepends=True)
+        matches = [index for index, line in enumerate(lines)
+                   if line.strip()
+                   and pattern.search(line.strip())]
+        for index in matches:
+            line = lines[index]
+            try:
+                answer = input(
+                    f"{c.green}Found: {c.cyan}{line.rstrip(chr(10) + chr(13))}{c.reset}. "
+                    "Do you mean this line, y/N? [a = remove all matches] "
+                ).strip().casefold()
+            except (EOFError, KeyboardInterrupt):
+                print("\nRemoval canceled. No changes were made.")
+                return 0
+            if answer not in ("y", "a"):
+                continue
+            # Do not overwrite edits made while the confirmation was pending.
+            with open(self.config_path, newline="") as config:
+                if config.read() != original:
+                    print("Configuration changed during confirmation. Run --remove again.")
+                    return 1
+            removed = set(matches) if answer == "a" else {index}
+            self.ruleset = "".join(line for number, line in enumerate(lines) if number not in removed)
+            return self.deploy(replace_ruleset=True)
+        print("Removal canceled. No changes were made." if matches else "No matching rule found.")
+        return 0 if matches else 1
+
+    def deploy(self, replace_ruleset=False):
         if os.geteuid() != 0:
             print("Deployment requires root. Run this script with sudo.")
             return 1
@@ -415,7 +476,7 @@ class Deployer:
             return 1
         if self.check_env() != 0 or not self.backup_first():
             return 1
-        if not self.ruleset:
+        if not self.ruleset and not replace_ruleset:
             self.ruleset = self.compile_config(deploy=True)
 
         candidate = Path(f"{self.backup_file}.candidate")
@@ -431,7 +492,13 @@ class Deployer:
             deployment_ok = False
             try:
                 shutil.copyfile(candidate, self.config_path)
-                result = subprocess.run([self.nft, "-f", self.config_path], capture_output=True, text=True, timeout=30)
+                if replace_ruleset:
+                    # Flush and reload in one nft transaction, including configs
+                    # without their own flush directive, so old rules disappear.
+                    result = subprocess.run([self.nft, "-f", "-"], input="flush ruleset\n" + self.ruleset,
+                                            capture_output=True, text=True, timeout=30)
+                else:
+                    result = subprocess.run([self.nft, "-f", self.config_path], capture_output=True, text=True, timeout=30)
                 deployment_ok = result.returncode == 0
                 if not deployment_ok:
                     print(result.stderr or result.stdout or "Deployment failed.")
@@ -506,6 +573,7 @@ class Deployer:
         print(f"  {c.golden_orange}--dry-run: {c.light_gold}Do not actually deploy anything{c.reset}")
         print(f"  {c.golden_orange}--help: {c.light_gold}Show this help message{c.reset}")
         print(f"  {c.golden_orange}--deploy: {c.light_gold}Deploy the rulesets{c.reset}")
+        print(f"  {c.golden_orange}--remove RULE: {c.light_gold}Find lines by regex; y removes one, a removes all matches, with backup and failsafe{c.reset}")
         print(f"  {c.golden_orange}--config: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
         print(f"  {c.golden_orange}--file: {c.light_gold}Append input-chain rules from a file above pkttype (no table/chain wrapper){c.reset}")
         print(f"  {c.golden_orange}--port: {c.light_gold}Allow a specific port in the config from your personal local subnet{c.reset}")

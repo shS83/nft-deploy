@@ -67,7 +67,7 @@ print('stderr-connected', file=sys.stderr, flush=True)
             while select.select([master], [], [], 0.1)[0]:
                 output += os.read(master, 4096)
             self.assertIn(b'\x1b7\x1b[24;50H', output)
-            self.assertIn('♳'.encode(), output)
+            self.assertIn(b'  1 seconds', output)
             self.assertIn(b'status-check-reached', output)
             self.assertIn(b'stderr-connected', output)
         finally:
