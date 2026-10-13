@@ -54,6 +54,38 @@ class FailsafeTests(unittest.TestCase):
                 self.assertTrue(guard.rollback())
             self.assertEqual(config.read_text(), 'old rules')
 
+    def test_failed_service_restores_backup_and_restarts_even_with_valid_loaded_rules(self):
+        for forced in (False, True):
+            with self.subTest(force=forced), tempfile.TemporaryDirectory() as directory:
+                backup = Path(directory) / 'backup'
+                config = Path(directory) / 'config'
+                backup.write_text('old rules')
+                config.write_text('new rules')
+                guard = self.guard(str(backup), str(config))
+                guard.force = forced
+                responses = [result(0, 'enabled'), result(3, 'failed'), result(0, 'table inet filter {}')]
+                if not forced:
+                    responses.append(result())
+                responses.extend([result(), result(), result(0, 'enabled'), result(3, 'inactive'), result(0, 'table inet filter {}')])
+                if not forced:
+                    responses.append(result())
+                with patch.object(guard, 'countdown'), patch.object(module.time, 'sleep'), patch.object(guard, 'run', side_effect=responses) as run:
+                    self.assertTrue(guard.activate_failsafe())
+                self.assertEqual(config.read_text(), 'old rules')
+                commands = [call.args[0] for call in run.call_args_list]
+                self.assertIn(['systemctl', 'restart', 'nftables.service'], commands)
+                self.assertIn(['/usr/bin/nft', '-c', '-f', str(backup)], commands)
+
+    def test_service_still_failed_after_restart_is_unsuccessful_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup = Path(directory) / 'backup'
+            config = Path(directory) / 'config'
+            backup.write_text('old rules')
+            config.write_text('new rules')
+            guard = self.guard(str(backup), str(config))
+            with patch.object(module.time, 'sleep'), patch.object(guard, 'run', side_effect=[result(), result(), result(0, 'enabled'), result(3, 'failed'), result(0, 'table inet filter {}'), result()]):
+                self.assertFalse(guard.rollback())
+
     def test_ruleset_permission_error_is_unhealthy(self):
         guard = self.guard()
         with patch.object(guard, 'run', side_effect=[result(), result(), result(1), result()]):

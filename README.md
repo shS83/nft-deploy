@@ -1,5 +1,14 @@
 # NFT-Deploy
 
+Failsafe accepts an inactive nftables service when rules are loaded and the
+other checks pass. A `failed` service state triggers backup restoration and
+`systemctl restart nftables.service`, including with `--force` enabled.
+If the service remains failed after rollback, failsafe displays the default
+base configuration and offers a confirmed replacement. A background guard
+prints `sudo ./nft-failsafe --restore-default --config FILE` so confirmation
+can be read in the foreground. The current file is backed up separately,
+defaults are validated and installed atomically, and the service is restarted.
+
 `--force` (or `-f`) skips `nft -c -f` validation tests for
 deployment, removal, dry-run and failsafe status checks. The backup is always
 validated immediately before rollback. The guard receives the deployment's
