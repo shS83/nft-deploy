@@ -14,10 +14,13 @@ spec.loader.exec_module(m)
 
 
 class CliPortsTests(unittest.TestCase):
-    def test_compile_config_includes_ports_without_custom_file(self):
+    def test_merge_ruleset_includes_ports_without_custom_file(self):
         with tempfile.TemporaryDirectory() as directory:
             deployer = m.Deployer.__new__(m.Deployer)
-            deployer.custom_file = None
+            deployer.custom_input_files = []
+            deployer.custom_forward_files = []
+            deployer.custom_output_files = []
+            deployer.STATE = [deployer.State.INPUT]
             deployer.ports = [1234]
             deployer.network = "192.0.2.0/24"
             deployer.comment = None
@@ -25,10 +28,9 @@ class CliPortsTests(unittest.TestCase):
             deployer.dry_run_config_file = Path(directory) / "dry-run.conf"
             deployer.ruleset = ""
 
-            with mock.patch.object(deployer, "get_default_rules", return_value="pkttype host"), \
-                    mock.patch.object(deployer, "get_promethean_rules", return_value="allow defaults"), \
+            with mock.patch.object(deployer, "get_promethean_rules", return_value="allow defaults"), \
                     contextlib.redirect_stdout(io.StringIO()):
-                result = deployer.compile_config(deploy=False)
+                result = deployer.merge_ruleset(deployer.get_default_rules())
 
             self.assertIn("allow defaults", result)
             self.assertIn("tcp dport 1234", result)

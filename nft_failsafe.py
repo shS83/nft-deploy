@@ -12,7 +12,12 @@ from colors import Color as c
 from nft_highlight import highlight_ruleset
 
 class Failsafe:
-    def __init__(self, failsafe_timer, backupfile, config_file="/etc/nftables.conf", simulate_failure=False, lock_fd=None):
+    def __init__(self, failsafe_timer, backupfile, config_file="/etc/nftables.conf", simulate_failure=False, lock_fd=None, force=False):
+        self.force = force
+        self.deployment_failed = False
+        self.deployment_error = ""
+        self.diagnostics = []
+        self.rollback_started = False
         self.simulate_failure = simulate_failure
         self.timer = failsafe_timer
         self.backup_file = backupfile
@@ -26,7 +31,10 @@ class Failsafe:
     def run(self, command):
         result = subprocess.run(command, capture_output=True, text=True, timeout=30)
         if result.returncode and result.stderr:
-            print(result.stderr.strip(), flush=True)
+            diagnostic = result.stderr.strip()
+            self.diagnostics.append(diagnostic)
+            if not self.force or self.rollback_started:
+                print(diagnostic, flush=True)
         return result
 
     def print_above_prompt(self, text: str) -> None:
@@ -88,9 +96,10 @@ class Failsafe:
         enabled = self.run(["systemctl", "is-enabled", "nftables.service"])
         active = self.run(["systemctl", "is-active", "nftables.service"])
         rules = self.run([self.nft, "list", "ruleset"])
-        configured = self.run([self.nft, "-c", "-f", self.config_file])
+        forced = getattr(self, "force", False)
+        configured = None if forced else self.run([self.nft, "-c", "-f", self.config_file])
         loaded = rules.returncode == 0 and bool(rules.stdout.strip())
-        configuration_valid = configured.returncode == 0
+        configuration_valid = configured is None or configured.returncode == 0
         try:
             configured_ruleset = Path(self.config_file).read_text()
         except (OSError, UnicodeError) as error:
@@ -110,13 +119,11 @@ class Failsafe:
         print(f"{c.white}Systemd service enabled: {c.lime_green if enabled.returncode == 0 else c.crimson}{enabled.stdout.strip().capitalize()}")
         print(f"{c.white}Systemd service active: {c.lime_green if active.returncode == 0 else c.peach}{active.stdout.strip().capitalize()}")
         print(f"{c.white}Nftables ruleset loaded: {c.lime_green if loaded != 0 else c.crimson}{loaded}")
-        print(f"{c.white}Configuration valid: {c.lime_green if configuration_valid else c.crimson}{configuration_valid}")
-        system_status = (
-            enabled.returncode == 0
-            and active.returncode == 0
-            and loaded
-            and configuration_valid
-        )
+        if not forced:
+            print(f"{c.white}Configuration valid: {c.lime_green if configuration_valid else c.crimson}{configuration_valid}")
+        # Deployment loads rules directly with nft; systemd's service state
+        # and boot enablement do not determine whether those rules are loaded.
+        system_status = loaded and configuration_valid and not getattr(self, "deployment_failed", False)
 
         print(
             f"{c.white}Comprehensive system status: {c.bright_green if system_status else c.crimson}{"Complete" if system_status else "Incomplete"}{c.reset}")
@@ -148,6 +155,12 @@ class Failsafe:
             )
 
     def rollback(self) -> bool:
+        self.rollback_started = True
+        if getattr(self, "force", False):
+            if getattr(self, "deployment_error", ""):
+                print(self.deployment_error, flush=True)
+            for diagnostic in getattr(self, "diagnostics", []):
+                print(diagnostic, flush=True)
         print(f"{c.white}Validating rollback configuration: {c.amethyst}{self.backup_file}{c.reset}", flush=True)
         if self.run([self.nft, "-c", "-f", self.backup_file]).returncode != 0:
             print(f"{c.crimson}Backup verification failed. Automatic rollback was aborted.{c.reset}", flush=True)
@@ -168,6 +181,7 @@ class Failsafe:
             print(f"{c.crimson}nftables restart failed after rollback.{c.reset}", flush=True)
             return False
 
+        self.deployment_failed = False
         time.sleep(1)
         healthy = self.check_main_status()
         if healthy:
@@ -242,6 +256,7 @@ def main():
     parser.add_argument("--rollback", action="store_true", help="Confirm backup restoration in the foreground")
     parser.add_argument("--simulate-failure", action="store_true", help="Simulate a failed check without changing the firewall")
     parser.add_argument("--lock-fd", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--force", "-f", action="store_true", help="Skip config checks except backup validation before rollback")
     args = parser.parse_args()
 
     if args.rollback and args.simulate_failure:
@@ -262,12 +277,16 @@ def main():
             args.config,
             simulate_failure=args.simulate_failure,
             lock_fd=args.lock_fd,
+            force=args.force,
         )
 
         if args.rollback:
             return 0 if failsafe.confirm_rollback() else 1
         if args.wait_for_parent:
-            sys.stdin.buffer.read()
+            outcome = sys.stdin.buffer.read()
+            if args.force:
+                failsafe.deployment_failed = outcome != b"ok\n"
+                failsafe.deployment_error = outcome.partition(b"\n")[2].decode("utf-8", errors="replace")
         return 0 if failsafe.activate_failsafe() else 1
 
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:

@@ -25,7 +25,34 @@ class FailsafeTests(unittest.TestCase):
     def test_disabled_boot_service_can_have_healthy_live_firewall(self):
         guard = self.guard()
         with patch.object(guard, 'run', side_effect=[result(1, 'disabled'), result(0, 'active'), result(0, 'table ip firewall {}'), result()]):
-            self.assertFalse(guard.check_main_status())
+            self.assertTrue(guard.check_main_status())
+
+    def test_inactive_service_with_valid_loaded_rules_does_not_trigger_rollback(self):
+        guard = self.guard()
+        with patch.object(guard, 'countdown'), patch.object(
+            guard, 'run', side_effect=[
+                result(0, 'enabled'), result(3, 'inactive'),
+                result(0, 'table inet filter {}'), result(),
+            ]
+        ), patch.object(guard, 'rollback') as rollback:
+            self.assertTrue(guard.activate_failsafe())
+        rollback.assert_not_called()
+
+    def test_rollback_succeeds_with_inactive_service_and_loaded_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup = Path(directory) / 'backup'
+            config = Path(directory) / 'config'
+            backup.write_text('old rules')
+            config.write_text('broken rules')
+            guard = self.guard(str(backup), str(config))
+            with patch.object(module.time, 'sleep'), patch.object(
+                guard, 'run', side_effect=[
+                    result(), result(), result(0, 'enabled'),
+                    result(3, 'inactive'), result(0, 'table inet filter {}'), result(),
+                ]
+            ):
+                self.assertTrue(guard.rollback())
+            self.assertEqual(config.read_text(), 'old rules')
 
     def test_ruleset_permission_error_is_unhealthy(self):
         guard = self.guard()
@@ -161,25 +188,21 @@ class FailsafeTests(unittest.TestCase):
 
     def test_invalid_backup_is_not_copied(self):
         guard = self.guard()
-        with patch.object(module.sys.stdin, 'isatty', return_value=True), patch.object(module.os, 'tcgetpgrp', return_value=module.os.getpgrp()), patch('builtins.input', return_value='k'), patch.object(guard, 'run', return_value=result(1)) as run, patch.object(module.shutil, 'copyfile') as copy:
+        with patch.object(module.sys.stdin, 'isatty', return_value=True), patch.object(module.os, 'tcgetpgrp', return_value=module.os.getpgrp()), patch('builtins.input', return_value='y'), patch.object(guard, 'run', return_value=result(1)) as run, patch.object(module.shutil, 'copyfile') as copy:
             self.assertFalse(guard.confirm_rollback())
             self.assertEqual(run.call_count, 1)
             copy.assert_not_called()
 
-    def test_countdown_only_shows_last_nine_seconds_and_all_symbols(self):
+    def test_countdown_only_shows_last_nine_seconds_as_numbers(self):
         guard = self.guard()
         guard.timer = 11
         with patch.object(module.time, 'monotonic', side_effect=[0, *range(12)]), patch.object(module.time, 'sleep'), patch.object(guard, 'print_above_prompt') as output:
             guard.countdown()
         frames = [call.args[0] for call in output.call_args_list]
         self.assertEqual(len(frames), 10)
-        self.assertIn('  9 seconds', frames[0])
-        self.assertIn('  8 seconds', frames[1])
-        for frame, symbol in zip(frames[2:9], ('♹', '♸', '♷', '♶', '♵', '♴', '♳')):
-            self.assertIn(symbol, frame)
-            self.assertIn(str(module.c.gold), frame)
-        for frame, symbol, color in zip(frames[2:9], ('♹', '♸', '♷', '♶', '♵', '♴', '♳'), (module.c.lime_green,) * 3 + (module.c.yellow,) * 2 + (module.c.bright_red,) * 2):
-            self.assertIn(f'{color}{symbol}', frame)
+        colors = (module.c.lime_green,) * 5 + (module.c.yellow,) * 2 + (module.c.bright_red,) * 2
+        for frame, seconds, color in zip(frames[:-1], range(9, 0, -1), colors):
+            self.assertEqual(frame, f'{module.c.gold}Failsafe in {color}{seconds:>3} seconds{module.c.reset}')
         self.assertEqual(frames[-1], '')
 
     def test_overlay_preserves_cursor_and_avoids_last_column(self):

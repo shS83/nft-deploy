@@ -21,6 +21,14 @@ failsafe_spec.loader.exec_module(failsafe_module)
 
 
 class DeploySafetyTests(unittest.TestCase):
+    def test_lock_permission_failure_is_reported_without_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployer = self.deployer(directory)
+            with mock.patch.object(deploy_module.os, 'open', side_effect=PermissionError('denied')), mock.patch('builtins.print') as output:
+                self.assertFalse(deployer.acquire_deploy_lock())
+            self.assertIn('sudo', output.call_args.args[0])
+            self.assertIsNone(deployer.lock_fd)
+
     def deployer(self, directory):
         deployer = deploy_module.Deployer.__new__(deploy_module.Deployer)
         deployer.tmp_path = str(directory)

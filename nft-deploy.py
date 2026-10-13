@@ -74,17 +74,21 @@ class Deployer:
         INPUT = "Input chain modified."
         FORWARD = "Forward chain modified."
         OUTPUT = "Output chain modified."
+        REMOVE = "Matching configuration lines removed."
 
     STATE = [State.NONE]
     global STATUS
 
-    def __init__(self, args: list):
+    def __init__(self, args: list, initialize_runtime: bool = True):
         self.pwd: str = str(Path(__file__).resolve().parent)
         self.args: list = args
         self.STATE = [self.State.NONE]
         self.is_dry_run: bool = False
+        self.force: bool = False
+        self.deployment_error: str = ""
         self.use_current_rules: bool = False
         self.use_default_profile: bool = False
+        self.use_prometheus_profile: bool = False
         self.failsafe: object = None
         self.config_path: str = "/etc/nftables.conf"
         self.ports: list = []
@@ -101,11 +105,12 @@ class Deployer:
         self.custom_ruleset: str = ""
         self.ruleset: str = ""
         self.comment: str | None = None
+        self.remove_pattern: str | None = None
         self.compressed_config: bytes = b""
         self.failsafe_timer: float = 15.0
         self.user_home: str | None = os.getenv("HOME")
         self.backup_file: str = "/tmp/nft-deploy/nftables.conf.backup"
-        network = get_default_network()
+        network = get_default_network() if initialize_runtime else {}
         self.network: str | int | None | any = network.get("network", "127.0.0.1")
         self.bits: str | int | None | any = network.get("bits", "32")
         self.optimized: str | None = None
@@ -113,7 +118,7 @@ class Deployer:
         self.lock_fd: int | None = None
         self.lock_transferred: bool = False
         self.nft = shutil.which("nft")
-        if self.nft is None:
+        if self.nft is None and initialize_runtime:
             raise FileNotFoundError(f"{c.crimson}nft is not installed.{c.reset}")
 
     @staticmethod
@@ -291,7 +296,9 @@ class Deployer:
 
     def merge_ruleset(self, ruleset: str, custom_ruleset: str = "", ports: list | None = None, disabled_ports: list | None = None) -> str:
         if custom_ruleset == "":
-            if getattr(self, "use_default_profile", False):
+            if getattr(self, "use_prometheus_profile", False):
+                custom_ruleset = self.get_promethean_rules()
+            elif getattr(self, "use_default_profile", False):
                 custom_ruleset = self.get_default_profile_rules()
             elif not self._has_custom_rule_files() and not any(
                 getattr(self, f"custom_{chain}_rules", [])
@@ -464,9 +471,10 @@ class Deployer:
 
     def check_args(self):
         action = None
+        list_requested = False
         options_with_values = {
             "--port", "--ports", "-p", "--comment", "-m", "--config", "-C",
-            "--timer", "-t",
+            "--timer", "-t", "--remove", "-R",
             "--input-file", "-I", "--forward-file", "-F",
             "--output-file", "-O", "--close-port", "--close-ports", "-x",
             "--input-rule", "--output-rule", "--forward-rule",
@@ -479,6 +487,16 @@ class Deployer:
                 continue
 
             match arg:
+                case "--force" | "-f":
+                    self.force = True
+
+                case "--remove" | "-R":
+                    if i + 1 >= len(self.args) or self.args[i + 1].startswith("--"):
+                        raise SystemExit("--remove needs a rule or regex.")
+                    if getattr(self, "remove_pattern", None) is not None:
+                        raise SystemExit("Specify --remove only once.")
+                    self.remove_pattern = self.args[i + 1]
+
                 case "--port" | "--ports" | "-p":
                     if i + 1 >= len(self.args):
                         raise SystemExit(f"{c.crimson}{arg} needs a value{c.reset}")
@@ -586,6 +604,13 @@ class Deployer:
                         self.STATE.remove(self.State.NONE)
                     self.STATE.append(self.State.INPUT)
 
+                case "--prometheus":  # for DEBUG purposes only
+                    self.use_prometheus_profile = True
+                    if self.State.NONE in self.STATE:
+                        self.STATE.remove(self.State.NONE)
+                    if self.State.INPUT not in self.STATE:
+                        self.STATE.append(self.State.INPUT)
+
                 case "--deploy" | "-X":
                     action = "deploy"
 
@@ -601,8 +626,26 @@ class Deployer:
                 case "--status" | "-s":
                     action = "status"
 
+                case "--list" | "-l":
+                    list_requested = True
+                    action = "list"
+
                 case _:
                     raise SystemExit(f"Invalid argument: {c.crimson}{arg}")
+
+        if list_requested:
+            for i, arg in enumerate(self.args[1:], start=1):
+                if i > 1 and self.args[i - 1] in options_with_values:
+                    continue
+                if arg not in ("--list", "-l", "--config", "-C"):
+                    raise SystemExit("--list can only be combined with --config.")
+            return self.list_config()
+
+        if getattr(self, "use_prometheus_profile", False) and (
+            getattr(self, "use_current_rules", False)
+            or getattr(self, "use_default_profile", False)
+        ):
+            raise SystemExit("--prometheus cannot be combined with --default or --use-current-rules.")
 
         if (
             getattr(self, "use_current_rules", False)
@@ -612,6 +655,15 @@ class Deployer:
                 f"{c.crimson}--default cannot be combined with "
                 f"--use-current-rules{c.reset}"
             )
+
+        if getattr(self, "remove_pattern", None) is not None and action != "help":
+            allowed = {"--remove", "-R", "--config", "-C", "--timer", "-t", "--force", "-f"}
+            for i, arg in enumerate(self.args[1:], start=1):
+                if i > 1 and self.args[i - 1] in options_with_values:
+                    continue
+                if arg.startswith("-") and arg not in allowed:
+                    raise SystemExit("--remove can only be combined with --config, --timer and --force.")
+            return self.remove_rule()
 
         match action:
             case "deploy":
@@ -633,6 +685,16 @@ class Deployer:
             case _:
                 print(f"{c.crimson}This should have never been reached.{c.reset}")
                 return 1
+        return 0
+
+    def list_config(self) -> int:
+        try:
+            with open(self.config_path, newline="") as config:
+                ruleset = config.read()
+        except (OSError, UnicodeError) as error:
+            print(f"Cannot read configuration {self.config_path}: {error}", file=sys.stderr)
+            return 1
+        print(highlight_ruleset(ruleset.expandtabs(4)), end="")
         return 0
 
     def optimize(self) -> int:
@@ -734,20 +796,39 @@ class Deployer:
             f"{c.bright_green}{state_names}{c.reset}."
         )
 
+    def validation_passes(self, filename) -> bool:
+        if getattr(self, "force", False):
+            print(f"--force: skipping nft configuration validation: {filename}")
+            return True
+        return self.test_rules(filename) == 0
+
+    def handle_failed_deployment(self) -> None:
+        if getattr(self, "force", False):
+            print("Failsafe verification continues in the background.", flush=True)
+        else:
+            shutil.copyfile(self.backup_file, self.config_path)
+
     def acquire_deploy_lock(self) -> bool:
         lock_directory = Path(getattr(self, "tmp_path", "/tmp/nft-deploy"))
-        lock_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         lock_file = lock_directory / "deploy.lock"
-        lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
+        lock_fd = None
         try:
+            lock_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.ftruncate(lock_fd, 0)
+            os.write(lock_fd, f"{os.getpid()}\n".encode())
         except BlockingIOError:
-            os.close(lock_fd)
+            if lock_fd is not None:
+                os.close(lock_fd)
             print(f"{c.crimson}Another deployment or failsafe check is already running.{c.reset}")
             return False
+        except OSError as error:
+            if lock_fd is not None:
+                os.close(lock_fd)
+            print(f"Cannot acquire deployment lock {lock_file}: {error}. Run with sudo if permissions are insufficient.")
+            return False
 
-        os.ftruncate(lock_fd, 0)
-        os.write(lock_fd, f"{os.getpid()}\n".encode())
         self.lock_fd = lock_fd
         self.lock_transferred = False
         return True
@@ -761,6 +842,60 @@ class Deployer:
         self.lock_fd = None
         self.lock_transferred = False
 
+    def remove_rule(self) -> int:
+        if os.geteuid() != 0:
+            print("Removal requires root. Run this script with sudo.")
+            return 1
+        if not self.remove_pattern or not self.remove_pattern.strip():
+            print("--remove needs a non-empty rule or regex.")
+            return 1
+        try:
+            pattern = re.compile(self.remove_pattern)
+        except re.error as error:
+            print(f"Invalid removal regex: {error}")
+            return 1
+        if not self.acquire_deploy_lock():
+            return 1
+        try:
+            with open(self.config_path, newline="") as config:
+                original = config.read()
+            lines = original.splitlines(keepends=True)
+            matches = [i for i, line in enumerate(lines) if line.strip() and pattern.search(line.strip())]
+            if not matches:
+                print("No matching rule found.")
+                return 1
+            removed = set()
+            for index in matches:
+                line = lines[index].rstrip("\r\n")
+                try:
+                    answer = input(
+                        f"{c.green}Found: {c.cyan}{line}{c.reset}. "
+                        "Do you mean this line, y/N? [a = remove all matches] "
+                    ).strip().casefold()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nRemoval canceled. No changes were made.")
+                    return 0
+                if answer == "a":
+                    removed = set(matches)
+                    break
+                if answer == "y":
+                    removed.add(index)
+            if not removed:
+                print("Removal canceled. No changes were made.")
+                return 0
+            with open(self.config_path, newline="") as config:
+                if config.read() != original:
+                    print("Configuration changed during confirmation. Run --remove again.")
+                    return 1
+            self.ruleset = "".join(line for i, line in enumerate(lines) if i not in removed)
+            self.STATE = [self.State.REMOVE]
+            return self._deploy_locked(replace_ruleset=True)
+        except (OSError, UnicodeError) as error:
+            print(f"Removal failed: {error}")
+            return 1
+        finally:
+            self.release_deploy_lock()
+
     def deploy(self) -> int:
         if not self.acquire_deploy_lock():
             return 1
@@ -769,7 +904,7 @@ class Deployer:
         finally:
             self.release_deploy_lock()
 
-    def _deploy_locked(self) -> int:
+    def _deploy_locked(self, replace_ruleset=False) -> int:
         if os.geteuid() != 0:
             print("Deployment requires root. Run this script with sudo.")
             return 1
@@ -779,7 +914,7 @@ class Deployer:
         if self.check_env() != 0:
             return 1
         print(f"{c.white}Validating current configuration before deployment...{c.reset}")
-        if self.test_rules(self.config_path) != 0:
+        if not self.validation_passes(self.config_path):
             print(
                 f"{c.crimson}Deployment aborted: the current configuration "
                 f"is not valid, so it cannot be used as a rollback point.{c.reset}"
@@ -787,33 +922,48 @@ class Deployer:
             return 1
         if not self.backup_first():
             return 1
-        if not self.ruleset:
+        if not self.ruleset and not replace_ruleset:
             self.ruleset = self.merge_ruleset(self.get_base_rules())
         candidate = Path(self.backup_file + ".candidate")
         candidate.write_text(self.ruleset)
         try:
-            if self.test_rules(str(candidate)) != 0:
+            if not self.validation_passes(str(candidate)):
                 return 1
             print("Deploying...", flush=True)
             # Start the independent guard before changing the firewall. It waits
             # for EOF so the countdown also starts if the parent exits early.
             guard = self.start_failsafe()
             deployment_ok = False
+            self.deployment_error = ""
             try:
                 shutil.copyfile(candidate, self.config_path)
-                result = subprocess.run(
-                    [self.nft, "-f", self.config_path],
-                    capture_output=True, text=True, timeout=30,
-                )
+                if replace_ruleset:
+                    result = subprocess.run(
+                        [self.nft, "-f", "-"], input="flush ruleset\n" + self.ruleset,
+                        capture_output=True, text=True, timeout=30,
+                    )
+                else:
+                    result = subprocess.run(
+                        [self.nft, "-f", self.config_path],
+                        capture_output=True, text=True, timeout=30,
+                    )
                 deployment_ok = result.returncode == 0
                 if not deployment_ok:
-                    print(result.stderr or result.stdout or "Deployment failed.")
-                    shutil.copyfile(self.backup_file, self.config_path)
+                    self.deployment_error = result.stderr or result.stdout or "Deployment failed."
+                    if not getattr(self, "force", False):
+                        print(self.deployment_error)
+                    self.handle_failed_deployment()
             except (OSError, subprocess.SubprocessError) as error:
-                print(f"Deployment failed: {error}")
-                shutil.copyfile(self.backup_file, self.config_path)
+                self.deployment_error = f"Deployment failed: {error}"
+                if not getattr(self, "force", False):
+                    print(self.deployment_error)
+                self.handle_failed_deployment()
             finally:
-                guard.stdin.close()
+                try:
+                    if getattr(self, "force", False):
+                        guard.stdin.write(b"ok\n" if deployment_ok else b"failed\n" + self.deployment_error.encode("utf-8"))
+                finally:
+                    guard.stdin.close()
             if deployment_ok:
                 print(f"Configuration saved in {self.config_path}. Failsafe verification continues in the background.", flush=True)
                 self.print_change_summary()
@@ -850,9 +1000,8 @@ class Deployer:
         with open(self.dry_run_config, "w") as f:
             f.write(self.ruleset)
         print(f"Wrote config file to: {c.bright_pink}{self.dry_run_config}{c.reset}")
-        passable = self.test_rules(self.dry_run_config)
-        if passable != 0:
-            print(f"{c.crimson}This was tested and something is really broken, sorry mate.{c.reset}")
+        if not self.validation_passes(self.dry_run_config):
+            print(f"{c.crimson}NFT Reports of configuration failure. Aborting.{c.reset}")
             return 1
         print(f"{c.yellow}Dry run finished successfully.{c.reset}")
         self.print_change_summary(proposed=True)
@@ -869,9 +1018,11 @@ class Deployer:
         print(f"  {c.golden_orange}--dry-run, -D: {c.light_gold}Do not actually deploy anything{c.reset}")
         print(f"  {c.golden_orange}--help, -h: {c.light_gold}Show this help message{c.reset}")
         print(f"  {c.golden_orange}--deploy, -X: {c.light_gold}Deploy the selected ruleset{c.reset}")
+        print(f"  {c.golden_orange}--remove, -R REGEX: {c.light_gold}Search current config including comments; ask for each line (y removes it, a removes all matches); backup and failsafe protect the deployment{c.reset}")
         print(f"  {c.golden_orange}--config, -C: {c.light_gold}Specify your nftables.conf location (default: /etc/nftables.conf){c.reset}")
         print(f"  {c.golden_orange}--use-current-rules, -U: {c.light_gold}Use the current config as the base ruleset{c.reset}")
         print(f"  {c.golden_orange}--default, -d: {c.light_gold}Deploy the default CIFS and SSH firewall for the local network{c.reset}")
+        print(f"  {c.golden_orange}--prometheus: {c.light_gold}Use default rules supplemented with Promethean rules (for DEBUG purposes only){c.reset}")
         print(f"  {c.golden_orange}--input-file, -I: {c.light_gold}Append input-chain rules from a file; may be repeated{c.reset}")
         print(f"  {c.golden_orange}--input-rule, --output-rule, --forward-rule: {c.light_gold}Append one quoted rule to the named chain; may be repeated{c.reset}")
         print(f"  {c.golden_orange}--forward-file, -F: {c.light_gold}Append forward-chain rules from a file; may be repeated{c.reset}")
@@ -882,6 +1033,8 @@ class Deployer:
         print(f"  {c.golden_orange}--comment, -m: {c.light_gold}Comment to be added into the config file for your ports{c.reset}")
         print(f"  {c.golden_orange}--timer, -t: {c.light_gold}failsafe timer in seconds (default: 15.0 seconds){c.reset}")
         print(f"  {c.golden_orange}--status, -s: {c.light_gold}Show system status{c.reset}")
+        print(f"  {c.golden_orange}--list, -l: {c.light_gold}Print the current configuration using nftables.nanorc colors{c.reset}")
+        print(f"  {c.golden_orange}--force, -f: {c.light_gold}Continue despite nft configuration validation errors{c.reset}")
 
         print()
         quit()
@@ -915,6 +1068,8 @@ class Deployer:
                 str(int(self.failsafe_timer)), self.backup_file,
                 "--config", self.config_path, "--wait-for-parent",
             ]
+            if getattr(self, "force", False):
+                command.append("--force")
             lock_fd = getattr(self, "lock_fd", None)
             pass_fds = ()
             if lock_fd is not None:
@@ -939,6 +1094,11 @@ class Deployer:
 
 
 if __name__ == "__main__":
-    process = Deployer(sys.argv)
+    if len(sys.argv) == 1 or "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        Deployer.help()
+    if any(arg in ("--remove", "-R") for arg in sys.argv[1:]) and os.geteuid() != 0:
+        print("Removal requires root. Run this script with sudo.")
+        sys.exit(1)
+    process = Deployer(sys.argv, initialize_runtime=not any(arg in ("--list", "-l") for arg in sys.argv[1:]))
     result = process.check_args()
     sys.exit(result)

@@ -1,12 +1,16 @@
 #!/bin/bash
-if [[ "${NFTD_DIR:-}" == "" ]]; then
-  if [[ -f ./nft-deploy.py && -f ./nft-failsafe.py ]]; then
-    ./.venv/bin/python3 ./nft-deploy.py "$@"
-  else
-    exit 1
-  fi
-else
-cd "$NFTD_DIR" || exit 1
-sudo ./.venv/bin/python3 ./nft-deploy.py "$@"
+script_dir="${NFTD_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
+cd -- "$script_dir" || exit 1
+if [[ ! -f ./nft-deploy.py || ! -f ./nft_failsafe.py ]]; then
+  echo "nft-deploy: deployment scripts missing from $script_dir" >&2
+  exit 1
 fi
-exit 0
+if [[ ! -x ./.venv/bin/python3 ]]; then
+  echo "nft-deploy: virtual environment missing from $script_dir/.venv" >&2
+  exit 1
+fi
+if [[ -n "${NFTD_DIR:-}" ]]; then
+  exec sudo ./.venv/bin/python3 ./nft-deploy.py "$@"
+else
+  exec ./.venv/bin/python3 ./nft-deploy.py "$@"
+fi

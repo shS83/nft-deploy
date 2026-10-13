@@ -1,11 +1,45 @@
 # NFT-Deploy
 
+`--force` (or `-f`) skips `nft -c -f` validation tests for
+deployment, removal, dry-run and failsafe status checks. The backup is always
+validated immediately before rollback. The guard receives the deployment's
+load result so failed loads trigger rollback even when older rules remain loaded.
+With force enabled, load and guard diagnostics are stored silently and shown
+only when rollback starts after the failsafe timer expires.
+Backups and failsafe remain enabled. If actual rule loading fails, deployment
+returns an error and leaves the candidate configuration for the failsafe to
+validate and restore normally. Service restart errors still count as failures.
+
+List the current configuration with `nftables.nanorc` syntax colors:
+`./nft-deploy --list` (or `-l`). Use `--config FILE` to select another file.
+Listing only reads the file and does not require nft or network discovery.
+Tabs are displayed with four-column tab stops; the configuration file is unchanged.
+
+`--prometheus` selects the default base rules supplemented with the complete
+Promethean rules (for DEBUG purposes only). Preview with
+`sudo ./nft-deploy --prometheus --dry-run`, or apply with
+`sudo ./nft-deploy --prometheus --deploy`.
+
 This is my attempt at a safe Nftables configuration updater which runs failsafe background process which checks if nftables is ok 
 after deploying the new configuration and if not tries to restart it and if it doesn't work, it rolls back the backuped previous config and restarts nftables.
 
 Port changes use TCP destination ports. `--input` (the default), `--output`,
 and `--forward` select the chains for all `--port` and `--close-port` options,
 regardless of argument order. Multiple chain flags can be combined.
+
+Remove lines from the current configuration with a regular expression:
+
+```sh
+sudo ./nft-deploy --remove 'hmm' --timer 15
+```
+
+`-R` is an alias for `--remove`. Patterns do not need `/` delimiters. The search includes commented lines.
+Each match is shown in turn: `y` selects that line for removal, Enter or `n`
+skips it, and `a` selects all matches, including previously skipped lines.
+Selected lines are removed together after the questions, with one backup,
+validation and failsafe deployment. Ctrl-C cancels the entire operation.
+Use `--config FILE` to search another configuration. Removal reloads the
+complete firewall ruleset in one transaction.
 
 `--port`, `--ports`, and `-p` accept a single port or comma-separated ports,
 and can be repeated. For example:
